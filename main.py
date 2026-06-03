@@ -88,6 +88,7 @@ JSON structure:
           {
             "round": 1,
             "stitch_count": 6,
+            "color_name": "Main color",
             "shape_change": "expanding",
             "symbols": ["sc","sc","sc","sc","sc","sc"],
             "increases": [0, 2, 4],
