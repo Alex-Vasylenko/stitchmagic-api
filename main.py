@@ -26,6 +26,13 @@ CRITICAL RULES:
 - Yarn yardage estimates must be realistic for the item and yarn weight.
 - Patterns must be suitable for the stated difficulty level.
 
+CHART RULES:
+- increases array: list the INDEX positions where inc stitches occur in that round
+- decreases array: list the INDEX positions where dec stitches occur
+- shape_change per round: expanding if stitch count grows, decreasing if it shrinks, straight if same as previous
+- notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc)
+- Be precise about increase/decrease positions - they must match the symbols array
+
 RESPOND WITH ONLY VALID JSON — no markdown, no explanation, no code fences.
 
 JSON structure:
@@ -36,9 +43,9 @@ JSON structure:
   "gauge": "X sc = X inches",
   "materials": {
     "yarn_weight": "weight",
-    "yarn_yardage": number,
+    "yarn_yardage": 100,
     "hook_size": "size",
-    "extras": ["item1", "item2"]
+    "extras": ["item1"]
   },
   "color_hex": "#hexcolor",
   "svg_type": "beanie|sweater|scarf|amigurumi|bag|blanket|socks|mittens|toy",
@@ -50,54 +57,33 @@ JSON structure:
           "id": "row_1",
           "row_number": 1,
           "instruction": "full instruction here",
-          "stitch_count": number
+          "stitch_count": 6
         }
       ]
     }
   ],
   "chart": {
-  "sections": [
-    {
-      "name": "Section name",
-      "type": "round | cylinder | flat",
-      "shape_change": "expanding | decreasing | straight",
-      "rounds": [
-        {
-          "round": 1,
-          "stitch_count": 6,
-          "shape_change": "expanding | decreasing | straight",
-          "symbols": ["sc","sc","sc","sc","sc","sc"],
-          "increases": [0, 2, 4],
-          "decreases": [],
-          "notes": "magic ring start"
-        }
-      ]
-    }
-  ]
-},
+    "sections": [
       {
-        "name": "Body",
-        "type": "cylinder",
+        "name": "Section name",
+        "type": "round",
+        "shape_change": "expanding",
         "rounds": [
           {
             "round": 1,
-            "stitch_count": 24,
-            "symbols": ["sc","sc","sc","sc","sc","sc","sc","sc","sc","sc","sc","sc"]
+            "stitch_count": 6,
+            "shape_change": "expanding",
+            "symbols": ["sc","sc","sc","sc","sc","sc"],
+            "increases": [0, 2, 4],
+            "decreases": [],
+            "notes": "magic ring start"
           }
         ]
       }
     ]
   },
-  "assembly": ["step1", "step2"]
+  "assembly": ["step1"]
 }"""
-
-CHART RULES:
-- "increases" array: list the INDEX positions where inc stitches occur in that round
-- "decreases" array: list the INDEX positions where dec stitches occur
-- "shape_change" per round: "expanding" if stitch count grows, 
-  "decreasing" if it shrinks, "straight" if same as previous
-- "notes": any special instruction for that round (magic ring, fasten off, stuff before closing etc)
-- Be precise about increase/decrease positions - they must match the symbols array
 
 class GenerateRequest(BaseModel):
     idea: str
@@ -106,7 +92,7 @@ class GenerateRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "StitchMagic API is running", "model": "claude-sonnet-4-20250514"}
+    return {"status": "StitchMagic API is running", "model": "claude-haiku-4-5-20251001"}
 
 @app.post("/api/generate")
 def generate_pattern(request: GenerateRequest):
@@ -122,17 +108,17 @@ def generate_pattern(request: GenerateRequest):
                 }
             ]
         )
-        
+
         text = message.content[0].text.strip()
-        
+
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
-        
+
         pattern = json.loads(text)
         return {"pattern": pattern}
-        
+
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"Invalid JSON from Claude: {str(e)}")
     except Exception as e:
