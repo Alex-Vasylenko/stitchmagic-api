@@ -25,7 +25,11 @@ CRITICAL RULES:
 - Include gauge, materials, and finished measurements.
 - Yarn yardage estimates must be realistic for the item and yarn weight.
 - Patterns must be suitable for the stated difficulty level.
-
+- Choose realistic yarn colors that match the item description. 
+  If user mentions a color, use it as Main color.
+  If item needs only one color, still return colors array with one item.
+  Always return hex codes for chosen colors.
+  
 CHART RULES:
 - increases array: list the INDEX positions where inc stitches occur in that round
 - decreases array: list the INDEX positions where dec stitches occur
@@ -47,7 +51,18 @@ JSON structure:
     "hook_size": "size",
     "extras": ["item1"]
   },
-  "color_hex": "#hexcolor",
+  "colors": [
+  {
+    "name": "Main color",
+    "hex": "#hexcolor",
+    "description": "primary yarn color for the main body"
+  },
+  {
+    "name": "Accent color",
+    "hex": "#hexcolor",
+    "description": "secondary color for details if needed"
+  }
+],
   "svg_type": "beanie|sweater|scarf|amigurumi|bag|blanket|socks|mittens|toy",
   "sections": [
     {
