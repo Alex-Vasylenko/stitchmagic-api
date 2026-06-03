@@ -55,6 +55,32 @@ JSON structure:
       ]
     }
   ],
+  "chart": {
+    "sections": [
+      {
+        "name": "Bottom",
+        "type": "round",
+        "rounds": [
+          {
+            "round": 1,
+            "stitch_count": 6,
+            "symbols": ["sc","sc","sc","sc","sc","sc"]
+          }
+        ]
+      },
+      {
+        "name": "Body",
+        "type": "cylinder",
+        "rounds": [
+          {
+            "round": 1,
+            "stitch_count": 24,
+            "symbols": ["sc","sc","sc","sc","sc","sc","sc","sc","sc","sc","sc","sc"]
+          }
+        ]
+      }
+    ]
+  },
   "assembly": ["step1", "step2"]
 }"""
 
