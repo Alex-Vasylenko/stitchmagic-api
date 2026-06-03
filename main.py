@@ -56,18 +56,25 @@ JSON structure:
     }
   ],
   "chart": {
-    "sections": [
-      {
-        "name": "Bottom",
-        "type": "round",
-        "rounds": [
-          {
-            "round": 1,
-            "stitch_count": 6,
-            "symbols": ["sc","sc","sc","sc","sc","sc"]
-          }
-        ]
-      },
+  "sections": [
+    {
+      "name": "Section name",
+      "type": "round | cylinder | flat",
+      "shape_change": "expanding | decreasing | straight",
+      "rounds": [
+        {
+          "round": 1,
+          "stitch_count": 6,
+          "shape_change": "expanding | decreasing | straight",
+          "symbols": ["sc","sc","sc","sc","sc","sc"],
+          "increases": [0, 2, 4],
+          "decreases": [],
+          "notes": "magic ring start"
+        }
+      ]
+    }
+  ]
+},
       {
         "name": "Body",
         "type": "cylinder",
@@ -83,6 +90,14 @@ JSON structure:
   },
   "assembly": ["step1", "step2"]
 }"""
+
+CHART RULES:
+- "increases" array: list the INDEX positions where inc stitches occur in that round
+- "decreases" array: list the INDEX positions where dec stitches occur
+- "shape_change" per round: "expanding" if stitch count grows, 
+  "decreasing" if it shrinks, "straight" if same as previous
+- "notes": any special instruction for that round (magic ring, fasten off, stuff before closing etc)
+- Be precise about increase/decrease positions - they must match the symbols array
 
 class GenerateRequest(BaseModel):
     idea: str
