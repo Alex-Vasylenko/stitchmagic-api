@@ -65,18 +65,19 @@ JSON structure:
 ],
   "svg_type": "beanie|sweater|scarf|amigurumi|bag|blanket|socks|mittens|toy",
   "sections": [
-    {
-      "name": "Section name",
-      "rows": [
-        {
-          "id": "row_1",
-          "row_number": 1,
-          "instruction": "full instruction here",
-          "stitch_count": 6
-        }
-      ]
-    }
-  ],
+  {
+    "name": "Section name",
+    "color_name": "Main color",
+    "rows": [
+      {
+        "id": "row_1",
+        "row_number": 1,
+        "instruction": "full instruction here",
+        "stitch_count": 6
+      }
+    ]
+  }
+],
   "chart": {
     "sections": [
       {
