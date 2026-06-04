@@ -25,17 +25,43 @@ CRITICAL RULES:
 - Include gauge, materials, and finished measurements.
 - Yarn yardage estimates must be realistic for the item and yarn weight.
 - Patterns must be suitable for the stated difficulty level.
-- Choose realistic yarn colors that match the item description. 
+- Choose realistic yarn colors that match the item description.
   If user mentions a color, use it as Main color.
   If item needs only one color, still return colors array with one item.
   Always return hex codes for chosen colors.
-  
+- ALWAYS generate ALL parts of the item. For amigurumi include body, 
+  head, all limbs, ears, tail, fins, and any other details as separate sections.
+  Never generate only the main body and skip other parts.
+  Each separate piece that needs to be crocheted independently must have 
+  its own section in both sections and chart.sections.
+  Examples:
+  - Whale: Body, Tail, Dorsal Fin, Pectoral Fins (x2)
+  - Teddy bear: Body, Head, Arms (x2), Legs (x2), Ears (x2)
+  - Mushroom: Cap, Stem, optional Spots
+  - Hat: Brim, Body, Crown
+- Use ALL standard crochet stitches when appropriate:
+  sc (single crochet), dc (double crochet), hdc (half double crochet),
+  tc (treble crochet), sl st (slip stitch), ch (chain),
+  inc (increase = 2sc in same st), dec (decrease = sc2tog),
+  fpdc (front post dc), bpdc (back post dc),
+  bobble, shell, cluster, picot
+
 CHART RULES:
 - increases array: list the INDEX positions where inc stitches occur in that round
 - decreases array: list the INDEX positions where dec stitches occur
 - shape_change per round: expanding if stitch count grows, decreasing if it shrinks, straight if same as previous
 - notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc)
 - Be precise about increase/decrease positions - they must match the symbols array
+- For chart type use:
+  round: circular items worked from center (amigurumi parts, hat crown, granny square)
+  cylinder: tubular items worked in continuous rounds (hat body, toy body, sleeves)
+  flat: items worked in rows with turning (scarves, blankets, flat squares)
+  cone: items that expand or decrease in a cone shape (pointed hat, carrot, tree)
+  triangle: triangular flat items (shawl, corner-to-corner blanket)
+  square: flat square items with marked corners (granny square body, pillow)
+- For square type, mark corner positions in the symbols array with "corner" symbol
+- For cone type, show expanding or decreasing circles proportionally
+- For triangle type, show rows that increase or decrease on one or both sides
 
 RESPOND WITH ONLY VALID JSON — no markdown, no explanation, no code fences.
 
@@ -52,44 +78,45 @@ JSON structure:
     "extras": ["item1"]
   },
   "colors": [
-  {
-    "name": "Main color",
-    "hex": "#hexcolor",
-    "description": "primary yarn color for the main body"
-  },
-  {
-    "name": "Accent color",
-    "hex": "#hexcolor",
-    "description": "secondary color for details if needed"
-  }
-],
+    {
+      "name": "Main color",
+      "hex": "#hexcolor",
+      "description": "primary yarn color for the main body"
+    },
+    {
+      "name": "Accent color",
+      "hex": "#hexcolor",
+      "description": "secondary color for details if needed"
+    }
+  ],
   "svg_type": "beanie|sweater|scarf|amigurumi|bag|blanket|socks|mittens|toy",
   "sections": [
-  {
-    "name": "Section name",
-    "color_name": "Main color",
-    "rows": [
-      {
-        "id": "row_1",
-        "row_number": 1,
-        "instruction": "full instruction here",
-        "stitch_count": 6
-      }
-    ]
-  }
-],
+    {
+      "name": "Section name",
+      "color_name": "Main color",
+      "rows": [
+        {
+          "id": "row_1",
+          "row_number": 1,
+          "instruction": "full instruction here",
+          "stitch_count": 6
+        }
+      ]
+    }
+  ],
   "chart": {
     "sections": [
       {
         "name": "Section name",
-        "type": "round",
-        "shape_change": "expanding",
+        "type": "round|cylinder|flat|cone|triangle|square",
+        "color_name": "Main color",
+        "shape_change": "expanding|decreasing|straight",
         "rounds": [
           {
             "round": 1,
             "stitch_count": 6,
-            "color_name": "Main color",
             "shape_change": "expanding",
+            "color_name": "Main color",
             "symbols": ["sc","sc","sc","sc","sc","sc"],
             "increases": [0, 2, 4],
             "decreases": [],
@@ -99,7 +126,7 @@ JSON structure:
       }
     ]
   },
-  "assembly": ["step1"]
+  "assembly": ["step1", "step2"]
 }"""
 
 class GenerateRequest(BaseModel):
