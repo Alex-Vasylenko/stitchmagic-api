@@ -52,25 +52,26 @@ CHART RULES:
 - shape_change per round: expanding if stitch count grows, decreasing if it shrinks, straight if same as previous
 - notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc)
 - Be precise about increase/decrease positions - they must match the symbols array
-- For chart type use these rules based on the ACTUAL ROW INSTRUCTIONS, never based on piece name:
-  flat: use when ANY row instruction contains "turn", "ch 1 turn", "ch 2 turn",
-        or any variation of turning the work. This includes fins, ears, petals,
-        leaves, flat squares, scarves, any piece worked back and forth in rows.
-  round: use when rows start with "magic ring" or end with "join with sl st"
-         or "sl st to join" or "join to first st". This includes amigurumi parts
-         worked from center, granny squares, hat crowns.
-  cylinder: use when rows are worked continuously without turning and without
-            joining. This includes hat bodies, toy bodies, sleeves, tubes.
-  cone: use when rows are worked in round but stitch count changes dramatically
-        in one direction only (only expanding or only decreasing throughout).
-  triangle: use when flat rows consistently increase or decrease on both ends
-            creating a triangular shape.
-  square: use when round rows have exactly 4 corner positions marked with ch-2
-          or ch-3 spaces creating square corners.
-- NEVER guess the type based on the piece name alone.
-  Always determine type from the actual stitch instructions.
-  A "fin" worked with turns is flat. A "base" worked in magic ring is round.
-  A "body" worked continuously is cylinder.
+- For chart type follow this STRICT decision tree — check in this exact order:
+
+  STEP 1: Does round 1 notes contain "magic ring"?
+          YES → type = "round". STOP. Do not check anything else.
+          
+  STEP 2: Does any row instruction contain "turn"?
+          YES → type = "flat". STOP.
+          
+  STEP 3: Everything else → type = "cylinder".
+
+  CRITICAL: "magic ring" in notes ALWAYS means "round", even if the piece is called
+  "body", "head", "tail", or anything else. Never override this with "cylinder".
+  
+  Correct examples:
+  - Whale Body, round 1 notes = "magic ring, 6 sc" → "round"
+  - Whale Head, round 1 notes = "magic ring, 6 sc" → "round"
+  - Pectoral Fin, has "turn" in rows → "flat"
+  - Dorsal Fin, has "turn" in rows → "flat"
+  - Hat body, no magic ring, no turn, continuous spiral → "cylinder"
+
 - For square type, mark corner positions in the symbols array with "corner" symbol
 - For cone type, show expanding or decreasing circles proportionally
 - For triangle type, show rows that increase or decrease on one or both sides
