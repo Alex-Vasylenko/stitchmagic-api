@@ -16,6 +16,93 @@ app.add_middleware(
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
+
+def fix_chart_types(pattern: dict) -> dict:
+    """
+    Post-process chart section types based on actual row instructions.
+    Deterministic override — runs after Haiku generates the pattern.
+
+    Rules (checked in order):
+      1. round 1 notes contain 'magic ring' → type = 'round'
+      2. any row instruction contains 'turn' → type = 'flat'
+      3. everything else                     → type = 'cylinder'
+    """
+    try:
+        chart = pattern.get("chart")
+        if not chart or not isinstance(chart, dict):
+            return pattern
+
+        sections = chart.get("sections")
+        if not isinstance(sections, list):
+            return pattern
+
+        # Build lookup of human-readable instructions per section name
+        section_instructions: dict[str, list[str]] = {}
+        for sec in pattern.get("sections", []):
+            if not isinstance(sec, dict):
+                continue
+            name = sec.get("name", "")
+            rows = sec.get("rows", [])
+            instructions = []
+            for row in rows:
+                if isinstance(row, dict):
+                    instr = row.get("instruction", "")
+                    if instr:
+                        instructions.append(instr.lower())
+                elif isinstance(row, str):
+                    instructions.append(row.lower())
+            section_instructions[name] = instructions
+
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+
+            name = section.get("name", "")
+            rounds = section.get("rounds", [])
+
+            # Check 1: magic ring in round 1 notes
+            has_magic_ring = False
+            for r in rounds:
+                if isinstance(r, dict):
+                    notes = (r.get("notes", "") or "").lower()
+                    if "magic ring" in notes:
+                        has_magic_ring = True
+                        break
+
+            if has_magic_ring:
+                section["type"] = "round"
+                continue
+
+            # Check 2: 'turn' in human-readable instructions
+            has_turn = False
+            for instr in section_instructions.get(name, []):
+                if "turn" in instr:
+                    has_turn = True
+                    break
+
+            # Also check round notes for 'turn' as fallback
+            if not has_turn:
+                for r in rounds:
+                    if isinstance(r, dict):
+                        notes = (r.get("notes", "") or "").lower()
+                        if "turn" in notes:
+                            has_turn = True
+                            break
+
+            if has_turn:
+                section["type"] = "flat"
+                continue
+
+            # Check 3: default
+            section["type"] = "cylinder"
+
+    except Exception:
+        # Never crash the request due to post-processing
+        pass
+
+    return pattern
+
+
 SYSTEM_PROMPT = """You are an expert crochet pattern designer. When given a description, generate a complete, accurate crochet pattern in strict JSON format.
 
 CRITICAL RULES:
@@ -174,6 +261,10 @@ def generate_pattern(request: GenerateRequest):
                 text = text[4:]
 
         pattern = json.loads(text)
+
+        # Post-process: deterministically fix chart section types
+        pattern = fix_chart_types(pattern)
+
         return {"pattern": pattern}
 
     except json.JSONDecodeError as e:
