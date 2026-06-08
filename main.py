@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import anthropic
 import os
 import json
+import re
 
 app = FastAPI()
 
@@ -103,6 +104,33 @@ def fix_chart_types(pattern: dict) -> dict:
     return pattern
 
 
+def sanitize_svg(pattern: dict) -> dict:
+    """
+    Post-process svg field: strip newlines, normalize quotes, validate it starts with <svg.
+    If svg is invalid or missing — remove the field so frontend falls back gracefully.
+    """
+    try:
+        svg = pattern.get("svg")
+        if not svg or not isinstance(svg, str):
+            pattern.pop("svg", None)
+            return pattern
+
+        # Strip whitespace and newlines
+        svg = svg.replace("\n", "").replace("\r", "").replace("\t", "").strip()
+
+        # Must start with <svg and end with </svg>
+        if not svg.startswith("<svg") or not svg.endswith("</svg>"):
+            pattern.pop("svg", None)
+            return pattern
+
+        pattern["svg"] = svg
+
+    except Exception:
+        pattern.pop("svg", None)
+
+    return pattern
+
+
 SYSTEM_PROMPT = """You are an expert crochet pattern designer. When given a description, generate a complete, accurate crochet pattern in strict JSON format.
 
 CRITICAL RULES:
@@ -163,6 +191,20 @@ CHART RULES:
 - For cone type, show expanding or decreasing circles proportionally
 - For triangle type, show rows that increase or decrease on one or both sides
 
+SVG RULES:
+- Generate a simple cute SVG illustration of the finished crochet item
+- viewBox must be "0 0 200 400"
+- Use ONLY basic shapes: ellipse, circle, rect, path with simple curves
+- Max 18 SVG elements total (including defs)
+- Colors must match the pattern colors array (use the hex values from colors)
+- Style must be cute, round, soft — like a children's illustration
+- Include one subtle stitch texture: <defs><pattern id="s" width="6" height="5" patternUnits="userSpaceOnUse"><path d="M0.5 3.5Q3 0.5 5.5 3.5" fill="none" stroke="#000" stroke-width="0.6" opacity="0.07"/></pattern></defs>
+- Add cute face if item is an animal or toy: two small circle eyes + simple smile path
+- The illustration must be clearly recognizable as the specific item
+- Use double quotes for ALL SVG attributes — never single quotes
+- Return SVG as a single line with no line breaks or tabs
+- NO text elements inside SVG
+
 RESPOND WITH ONLY VALID JSON — no markdown, no explanation, no code fences.
 
 JSON structure:
@@ -182,13 +224,9 @@ JSON structure:
       "name": "Main color",
       "hex": "#hexcolor",
       "description": "primary yarn color for the main body"
-    },
-    {
-      "name": "Accent color",
-      "hex": "#hexcolor",
-      "description": "secondary color for details if needed"
     }
   ],
+  "svg": "<svg viewBox=\"0 0 200 400\" xmlns=\"http://www.w3.org/2000/svg\">...</svg>",
   "svg_type": "beanie|sweater|scarf|amigurumi|bag|blanket|socks|mittens|toy",
   "sections": [
     {
@@ -264,6 +302,9 @@ def generate_pattern(request: GenerateRequest):
 
         # Post-process: deterministically fix chart section types
         pattern = fix_chart_types(pattern)
+
+        # Post-process: sanitize and validate svg field
+        pattern = sanitize_svg(pattern)
 
         return {"pattern": pattern}
 
