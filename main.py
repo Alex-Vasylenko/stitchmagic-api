@@ -19,26 +19,14 @@ client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def fix_chart_types(pattern: dict) -> dict:
-    """
-    Post-process chart section types based on actual row instructions.
-    Deterministic override — runs after Haiku generates the pattern.
-
-    Rules (checked in order):
-      1. round 1 notes contain 'magic ring' → type = 'round'
-      2. any row instruction contains 'turn' → type = 'flat'
-      3. everything else                     → type = 'cylinder'
-    """
     try:
         chart = pattern.get("chart")
         if not chart or not isinstance(chart, dict):
             return pattern
-
         sections = chart.get("sections")
         if not isinstance(sections, list):
             return pattern
-
-        # Build lookup of human-readable instructions per section name
-        section_instructions: dict[str, list[str]] = {}
+        section_instructions = {}
         for sec in pattern.get("sections", []):
             if not isinstance(sec, dict):
                 continue
@@ -53,15 +41,11 @@ def fix_chart_types(pattern: dict) -> dict:
                 elif isinstance(row, str):
                     instructions.append(row.lower())
             section_instructions[name] = instructions
-
         for section in sections:
             if not isinstance(section, dict):
                 continue
-
             name = section.get("name", "")
             rounds = section.get("rounds", [])
-
-            # Check 1: magic ring in round 1 notes
             has_magic_ring = False
             for r in rounds:
                 if isinstance(r, dict):
@@ -69,19 +53,14 @@ def fix_chart_types(pattern: dict) -> dict:
                     if "magic ring" in notes:
                         has_magic_ring = True
                         break
-
             if has_magic_ring:
                 section["type"] = "round"
                 continue
-
-            # Check 2: 'turn' in human-readable instructions
             has_turn = False
             for instr in section_instructions.get(name, []):
                 if "turn" in instr:
                     has_turn = True
                     break
-
-            # Also check round notes for 'turn' as fallback
             if not has_turn:
                 for r in rounds:
                     if isinstance(r, dict):
@@ -89,46 +68,23 @@ def fix_chart_types(pattern: dict) -> dict:
                         if "turn" in notes:
                             has_turn = True
                             break
-
             if has_turn:
                 section["type"] = "flat"
                 continue
-
-            # Check 3: default
             section["type"] = "cylinder"
-
     except Exception:
-        # Never crash the request due to post-processing
         pass
-
     return pattern
 
 
-def sanitize_svg(pattern: dict) -> dict:
-    """
-    Post-process svg field: strip newlines, normalize quotes, validate it starts with <svg.
-    If svg is invalid or missing — remove the field so frontend falls back gracefully.
-    """
+def sanitize_svg(svg: str):
     try:
-        svg = pattern.get("svg")
-        if not svg or not isinstance(svg, str):
-            pattern.pop("svg", None)
-            return pattern
-
-        # Strip whitespace and newlines
         svg = svg.replace("\n", "").replace("\r", "").replace("\t", "").strip()
-
-        # Must start with <svg and end with </svg>
         if not svg.startswith("<svg") or not svg.endswith("</svg>"):
-            pattern.pop("svg", None)
-            return pattern
-
-        pattern["svg"] = svg
-
+            return None
+        return svg
     except Exception:
-        pattern.pop("svg", None)
-
-    return pattern
+        return None
 
 
 SYSTEM_PROMPT = """You are an expert crochet pattern designer. When given a description, generate a complete, accurate crochet pattern in strict JSON format.
@@ -179,31 +135,6 @@ CHART RULES:
 
   CRITICAL: "magic ring" in notes ALWAYS means "round", even if the piece is called
   "body", "head", "tail", or anything else. Never override this with "cylinder".
-  
-  Correct examples:
-  - Whale Body, round 1 notes = "magic ring, 6 sc" → "round"
-  - Whale Head, round 1 notes = "magic ring, 6 sc" → "round"
-  - Pectoral Fin, has "turn" in rows → "flat"
-  - Dorsal Fin, has "turn" in rows → "flat"
-  - Hat body, no magic ring, no turn, continuous spiral → "cylinder"
-
-- For square type, mark corner positions in the symbols array with "corner" symbol
-- For cone type, show expanding or decreasing circles proportionally
-- For triangle type, show rows that increase or decrease on one or both sides
-
-SVG RULES:
-- Generate a simple cute SVG illustration of the finished crochet item
-- viewBox must be "0 0 200 400"
-- Use ONLY basic shapes: ellipse, circle, rect, path with simple curves
-- Max 18 SVG elements total (including defs)
-- Colors must match the pattern colors array (use the hex values from colors)
-- Style must be cute, round, soft — like a children's illustration
-- Include one subtle stitch texture: <defs><pattern id="s" width="6" height="5" patternUnits="userSpaceOnUse"><path d="M0.5 3.5Q3 0.5 5.5 3.5" fill="none" stroke="#000" stroke-width="0.6" opacity="0.07"/></pattern></defs>
-- Add cute face if item is an animal or toy: two small circle eyes + simple smile path
-- The illustration must be clearly recognizable as the specific item
-- Use double quotes for ALL SVG attributes — never single quotes
-- Return SVG as a single line with no line breaks or tabs
-- NO text elements inside SVG
 
 RESPOND WITH ONLY VALID JSON — no markdown, no explanation, no code fences.
 
@@ -226,7 +157,6 @@ JSON structure:
       "description": "primary yarn color for the main body"
     }
   ],
-  "svg": "<svg viewBox=\"0 0 200 400\" xmlns=\"http://www.w3.org/2000/svg\">...</svg>",
   "svg_type": "beanie|sweater|scarf|amigurumi|bag|blanket|socks|mittens|toy",
   "sections": [
     {
@@ -267,14 +197,39 @@ JSON structure:
   "assembly": ["step1", "step2"]
 }"""
 
+SVG_SYSTEM_PROMPT = """You are an SVG illustration artist specializing in cute crochet toy illustrations.
+Generate a simple cute SVG illustration of a finished crochet item.
+
+STRICT RULES:
+- viewBox must be exactly "0 0 200 400"
+- Use ONLY basic shapes: ellipse, circle, rect, path
+- Max 20 SVG elements total
+- Style: cute, round, soft, like a children's toy illustration
+- Include subtle stitch texture pattern in defs
+- Add cute face (eyes + smile) if item is animal or toy
+- The illustration MUST be clearly recognizable as the specific item
+- Use double quotes for ALL attributes
+- Return single line SVG with no line breaks
+- NO text elements
+
+RESPOND WITH ONLY THE RAW SVG — nothing else, no markdown, no explanation."""
+
+
 class GenerateRequest(BaseModel):
     idea: str
     difficulty: str = "Easy"
     size: str = "Standard"
 
+
+class SvgRequest(BaseModel):
+    title: str
+    colors: list
+
+
 @app.get("/")
 def root():
     return {"status": "StitchMagic API is running", "model": "claude-haiku-4-5-20251001"}
+
 
 @app.post("/api/generate")
 def generate_pattern(request: GenerateRequest):
@@ -286,7 +241,7 @@ def generate_pattern(request: GenerateRequest):
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\n\nIMPORTANT: Your response MUST include the \"svg\" field with a complete SVG illustration of the item.\n\nReturn ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\n\nReturn ONLY the JSON object."
                 }
             ]
         )
@@ -299,12 +254,7 @@ def generate_pattern(request: GenerateRequest):
                 text = text[4:]
 
         pattern = json.loads(text)
-
-        # Post-process: deterministically fix chart section types
         pattern = fix_chart_types(pattern)
-
-        # Post-process: sanitize and validate svg field
-        pattern = sanitize_svg(pattern)
 
         return {"pattern": pattern}
 
@@ -312,6 +262,37 @@ def generate_pattern(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=f"Invalid JSON from Claude: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/generate-svg")
+def generate_svg(request: SvgRequest):
+    try:
+        colors_str = ", ".join([f"{c.get('name')} ({c.get('hex')})" for c in request.colors])
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            system=SVG_SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Generate SVG illustration for: {request.title}\nColors: {colors_str}\n\nReturn ONLY the SVG."
+                }
+            ]
+        )
+
+        svg_raw = message.content[0].text.strip()
+        svg = sanitize_svg(svg_raw)
+
+        if not svg:
+            raise HTTPException(status_code=500, detail="Invalid SVG generated")
+
+        return {"svg": svg}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/health")
 def health():
