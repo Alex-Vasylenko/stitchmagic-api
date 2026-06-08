@@ -286,7 +286,7 @@ def generate_pattern(request: GenerateRequest):
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\n\nReturn ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\n\nIMPORTANT: Your response MUST include the \"svg\" field with a complete SVG illustration of the item.\n\nReturn ONLY the JSON object."
                 }
             ]
         )
