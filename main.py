@@ -18,6 +18,102 @@ app.add_middleware(
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def expand_symbols(symbols: list) -> list:
+    """
+    Розгортає скорочені описи петель у список символів.
+    Наприклад:
+      "3 dc"                       → ["dc", "dc", "dc"]
+      "ch-2 sp"                    → ["ch", "ch"]
+      "[3 dc, ch 2, 3 dc] in corner" → ["dc","dc","dc","ch","ch","dc","dc","dc"]
+      "dc in next 3 st"            → ["dc","dc","dc"]
+    """
+    KNOWN = {
+        'sc', 'dc', 'hdc', 'tr', 'ch', 'sl', 'mr', 'inc', 'dec',
+        'fpdc', 'bpdc', 'shell', 'bobble', 'cluster', 'picot', 'slst'
+    }
+    # Довші варіанти першими — щоб "slst" не розпізнався як "sl"
+    KNOWN_ORDERED = ['fpdc', 'bpdc', 'hdc', 'slst', 'shell', 'bobble', 'cluster', 'picot',
+                     'sc', 'dc', 'tr', 'ch', 'sl', 'mr', 'inc', 'dec']
+
+    def parse_one(raw):
+        raw = str(raw).strip()
+        lower = raw.lower().replace('sl st', 'slst').replace('slip stitch', 'slst')
+
+        # magic ring → mr
+        if 'magic ring' in lower:
+            return ['mr']
+
+        has_digits = bool(re.search(r'\d', lower))
+
+        if not has_digits:
+            # Немає цифр — шукаємо відомі символи як цілі слова
+            result = []
+            for k in KNOWN_ORDERED:
+                if re.search(r'\b' + k + r'\b', lower):
+                    result.append('sl' if k == 'slst' else k)
+            return result if result else []
+
+        # Є цифри — збираємо всі (позиція, кількість, символ)
+        found = []
+
+        # Pattern A: digit → stitch  e.g. "3 dc", "3-dc", "3dc"
+        for m in re.finditer(r'(\d+)\s*[-]?\s*([a-z]+)', lower):
+            stitch = m.group(2)
+            if stitch == 'slst': stitch = 'sl'
+            if stitch in KNOWN or stitch == 'sl':
+                found.append((m.start(), int(m.group(1)), stitch))
+
+        # Pattern B: stitch → digit впритул  e.g. "ch 2", "ch-2"
+        for m in re.finditer(r'([a-z]+)\s*[-]?\s*(\d+)', lower):
+            stitch = m.group(1)
+            if stitch == 'slst': stitch = 'sl'
+            if stitch in KNOWN or stitch == 'sl':
+                found.append((m.start(), int(m.group(2)), stitch))
+
+        # Pattern D: stitch ... digit без коми між ними  e.g. "dc in next 3 st"
+        for m in re.finditer(
+            r'\b(sc|dc|hdc|tr|ch|sl|inc|dec|fpdc|bpdc)\b([^,\[\]]{1,20}?)(\d+)\s*(?:st|sp|times|sts|x)?\b',
+            lower
+        ):
+            stitch = m.group(1)
+            if stitch == 'slst': stitch = 'sl'
+            found.append((m.start(), int(m.group(3)), stitch))
+
+        # Pattern C: самотній символ без сусідньої цифри впритул
+        # Йде після D, але при dedup D перемагає завдяки більшому count
+        for k in KNOWN_ORDERED:
+            for m in re.finditer(r'\b' + k + r'\b', lower):
+                pos = m.start()
+                before = lower[max(0, pos - 3):pos]
+                after = lower[pos + len(k):pos + len(k) + 3]
+                no_digit_right = not re.search(r'^\s*\d', after)
+                no_digit_left_immediate = not re.search(r'\d\s*$', before)
+                if no_digit_right and no_digit_left_immediate:
+                    stitch = 'sl' if k == 'slst' else k
+                    found.append((pos, 1, stitch))
+
+        if found:
+            # При однаковій позиції — більший count перемагає (Pattern D > Pattern C)
+            seen_pos = set()
+            unique = []
+            for pos, count, stitch in sorted(found, key=lambda x: (-x[1], x[0])):
+                if pos not in seen_pos:
+                    seen_pos.add(pos)
+                    unique.append((pos, count, stitch))
+            unique.sort(key=lambda x: x[0])
+            result = []
+            for _, count, stitch in unique:
+                result.extend([stitch] * min(count, 50))
+            return result
+
+        return []
+
+    result = []
+    for sym in symbols:
+        result.extend(parse_one(sym))
+    return result
+
+
 def fix_chart_types(pattern: dict) -> dict:
     try:
         chart = pattern.get("chart")
@@ -46,6 +142,10 @@ def fix_chart_types(pattern: dict) -> dict:
                 continue
             name = section.get("name", "")
             rounds = section.get("rounds", [])
+            # Розгортаємо symbols у кожному раунді
+            for r in rounds:
+                if isinstance(r, dict) and "symbols" in r:
+                    r["symbols"] = expand_symbols(r["symbols"])
             has_magic_ring = False
             for r in rounds:
                 if isinstance(r, dict):
@@ -123,6 +223,11 @@ CHART RULES:
 - shape_change per round: expanding if stitch count grows, decreasing if it shrinks, straight if same as previous
 - notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc)
 - Be precise about increase/decrease positions - they must match the symbols array
+- CRITICAL: symbols array MUST contain individual stitch codes only.
+  Each element = one stitch. Use: sc, dc, hdc, tr, ch, sl, inc, dec, fpdc, bpdc, mr
+  NEVER put descriptions like "3 dc in ring" or "ch-2 sp" as single elements.
+  CORRECT: ["sc","sc","sc","dc","dc","ch","ch"]
+  WRONG:   ["3 sc", "2 dc in ring", "ch-2 sp"]
 - For chart type follow this STRICT decision tree — check in this exact order:
 
   STEP 1: Does round 1 notes contain "magic ring"?
