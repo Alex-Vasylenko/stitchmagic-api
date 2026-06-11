@@ -112,7 +112,7 @@ CRITICAL RULES:
   - Hat: Brim, Body, Crown
 - Use ALL standard crochet stitches when appropriate:
   sc (single crochet), dc (double crochet), hdc (half double crochet),
-  tc (treble crochet), sl st (slip stitch), ch (chain),
+  tr (treble crochet), sl st (slip stitch), ch (chain),
   inc (increase = 2sc in same st), dec (decrease = sc2tog),
   fpdc (front post dc), bpdc (back post dc),
   bobble, shell, cluster, picot
