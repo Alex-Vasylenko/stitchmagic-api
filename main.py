@@ -348,7 +348,7 @@ def generate_pattern(request: GenerateRequest):
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\nMeasurement units: {request.units} (use {request.units} for all dimensions, gauge, and finished size)\n\nReturn ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\nIMPORTANT: Use {request.units} for ALL measurements. Gauge must be in {request.units}. Finished size must be in {request.units}. Do not use any other unit of measurement.\n\nReturn ONLY the JSON object."
                 }
             ]
         )
