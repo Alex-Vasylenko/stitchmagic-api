@@ -71,6 +71,7 @@ def expand_symbols(symbols: list) -> list:
                 found.append((m.start(), int(m.group(2)), stitch))
 
         # Pattern D: stitch ... digit без коми між ними  e.g. "dc in next 3 st"
+        # Важливо: ПЕРЕД Pattern C, щоб мати пріоритет над одиночним символом
         for m in re.finditer(
             r'\b(sc|dc|hdc|tr|ch|sl|inc|dec|fpdc|bpdc)\b([^,\[\]]{1,20}?)(\d+)\s*(?:st|sp|times|sts|x)?\b',
             lower
@@ -324,6 +325,7 @@ class GenerateRequest(BaseModel):
     idea: str
     difficulty: str = "Easy"
     size: str = "Standard"
+    units: str = "cm"
 
 
 class SvgRequest(BaseModel):
@@ -346,7 +348,7 @@ def generate_pattern(request: GenerateRequest):
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\n\nReturn ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\nMeasurement units: {request.units} (use {request.units} for all dimensions, gauge, and finished size)\n\nReturn ONLY the JSON object."
                 }
             ]
         )
