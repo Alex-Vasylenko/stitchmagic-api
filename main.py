@@ -335,14 +335,14 @@ class SvgRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "StitchMagic API is running", "model": "claude-sonnet-4-6"}
+    return {"status": "StitchMagic API is running", "model": "claude-haiku-4-5-20251001"}
 
 
 @app.post("/api/generate")
 def generate_pattern(request: GenerateRequest):
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=8192,
             system=SYSTEM_PROMPT,
             messages=[
@@ -376,7 +376,7 @@ def generate_svg(request: SvgRequest):
     try:
         colors_str = ", ".join([f"{c.get('name')} ({c.get('hex')})" for c in request.colors])
         message = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1000,
             system=SVG_SYSTEM_PROMPT,
             messages=[
