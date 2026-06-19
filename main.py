@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 import anthropic
 import os
 import json
@@ -321,16 +321,49 @@ STRICT RULES:
 RESPOND WITH ONLY THE RAW SVG — nothing else, no markdown, no explanation."""
 
 
+ALLOWED_DIFFICULTIES = {"Beginner", "Easy", "Intermediate", "Advanced"}
+ALLOWED_UNITS = {"cm", "inches"}
+
+
 class GenerateRequest(BaseModel):
-    idea: str
+    idea: str = Field(..., min_length=3, max_length=500)
     difficulty: str = "Easy"
-    size: str = "Standard"
+    size: str = Field(default="Standard", max_length=100)
     units: str = "cm"
+
+    @field_validator("idea")
+    @classmethod
+    def strip_idea(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 3:
+            raise ValueError("idea must be at least 3 characters")
+        return v
+
+    @field_validator("difficulty")
+    @classmethod
+    def check_difficulty(cls, v: str) -> str:
+        if v not in ALLOWED_DIFFICULTIES:
+            raise ValueError(f"difficulty must be one of {sorted(ALLOWED_DIFFICULTIES)}")
+        return v
+
+    @field_validator("units")
+    @classmethod
+    def check_units(cls, v: str) -> str:
+        if v not in ALLOWED_UNITS:
+            raise ValueError(f"units must be one of {sorted(ALLOWED_UNITS)}")
+        return v
 
 
 class SvgRequest(BaseModel):
-    title: str
+    title: str = Field(..., min_length=1, max_length=100)
     colors: list
+
+    @field_validator("colors")
+    @classmethod
+    def check_colors(cls, v: list) -> list:
+        if len(v) > 10:
+            raise ValueError("colors must contain at most 10 items")
+        return v
 
 
 @app.get("/")
