@@ -1,7 +1,9 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 import anthropic
+from supabase import create_client, Client
+import httpx
 import os
 import json
 import re
@@ -17,21 +19,55 @@ app.add_middleware(
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
+SUPABASE_URL = "https://jgmjbwsfseoyympaxjdf.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpnbWpid3Nmc2VveXltcGF4amRmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzNzU5NjksImV4cCI6MjA5NTk1MTk2OX0.jsVFhOoRqUYQtYrL8cG6Z2hqx0wuscogVzRTyG2ofGA"
+EDGE_FUNCTION_URL = "https://jgmjbwsfseoyympaxjdf.supabase.co/functions/v1/increment-generations"
+
+PLAN_MODELS = {
+    "free": "claude-haiku-4-5-20251001",
+    "pro": "claude-sonnet-4-6",
+    "founder": "claude-sonnet-4-6",
+    "studio": "claude-sonnet-4-6",
+}
+
+
+def get_user_profile(authorization: str):
+    token = authorization.replace("Bearer ", "")
+    authed_client: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    authed_client.postgrest.auth(token)
+    user_resp = authed_client.auth.get_user(token)
+    if not user_resp.user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    user_id = user_resp.user.id
+    profile_resp = authed_client.table("profiles").select("*").eq("user_id", user_id).single().execute()
+    if not profile_resp.data:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile_resp.data
+
+
+def increment_generations(authorization: str, amount: float = 1.0):
+    """Викликає Edge Function для безпечного списування генерацій"""
+    response = httpx.post(
+        EDGE_FUNCTION_URL,
+        headers={
+            "Authorization": authorization,
+            "Content-Type": "application/json",
+        },
+        json={"amount": amount},
+        timeout=10.0,
+    )
+    if response.status_code == 402:
+        raise HTTPException(status_code=402, detail="Generation limit reached")
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to update generations")
+    return response.json()
+
 
 def expand_symbols(symbols: list) -> list:
-    """
-    Розгортає скорочені описи петель у список символів.
-    Наприклад:
-      "3 dc"                       → ["dc", "dc", "dc"]
-      "ch-2 sp"                    → ["ch", "ch"]
-      "[3 dc, ch 2, 3 dc] in corner" → ["dc","dc","dc","ch","ch","dc","dc","dc"]
-      "dc in next 3 st"            → ["dc","dc","dc"]
-    """
     KNOWN = {
         'sc', 'dc', 'hdc', 'tr', 'ch', 'sl', 'mr', 'inc', 'dec',
         'fpdc', 'bpdc', 'shell', 'bobble', 'cluster', 'picot', 'slst'
     }
-    # Довші варіанти першими — щоб "slst" не розпізнався як "sl"
     KNOWN_ORDERED = ['fpdc', 'bpdc', 'hdc', 'slst', 'shell', 'bobble', 'cluster', 'picot',
                      'sc', 'dc', 'tr', 'ch', 'sl', 'mr', 'inc', 'dec']
 
@@ -39,39 +75,32 @@ def expand_symbols(symbols: list) -> list:
         raw = str(raw).strip()
         lower = raw.lower().replace('sl st', 'slst').replace('slip stitch', 'slst')
 
-        # magic ring → mr
         if 'magic ring' in lower:
             return ['mr']
 
         has_digits = bool(re.search(r'\d', lower))
 
         if not has_digits:
-            # Немає цифр — шукаємо відомі символи як цілі слова
             result = []
             for k in KNOWN_ORDERED:
                 if re.search(r'\b' + k + r'\b', lower):
                     result.append('sl' if k == 'slst' else k)
             return result if result else []
 
-        # Є цифри — збираємо всі (позиція, кількість, символ)
         found = []
 
-        # Pattern A: digit → stitch  e.g. "3 dc", "3-dc", "3dc"
         for m in re.finditer(r'(\d+)\s*[-]?\s*([a-z]+)', lower):
             stitch = m.group(2)
             if stitch == 'slst': stitch = 'sl'
             if stitch in KNOWN or stitch == 'sl':
                 found.append((m.start(), int(m.group(1)), stitch))
 
-        # Pattern B: stitch → digit впритул  e.g. "ch 2", "ch-2"
         for m in re.finditer(r'([a-z]+)\s*[-]?\s*(\d+)', lower):
             stitch = m.group(1)
             if stitch == 'slst': stitch = 'sl'
             if stitch in KNOWN or stitch == 'sl':
                 found.append((m.start(), int(m.group(2)), stitch))
 
-        # Pattern D: stitch ... digit без коми між ними  e.g. "dc in next 3 st"
-        # Важливо: ПЕРЕД Pattern C, щоб мати пріоритет над одиночним символом
         for m in re.finditer(
             r'\b(sc|dc|hdc|tr|ch|sl|inc|dec|fpdc|bpdc)\b([^,\[\]]{1,20}?)(\d+)\s*(?:st|sp|times|sts|x)?\b',
             lower
@@ -80,8 +109,6 @@ def expand_symbols(symbols: list) -> list:
             if stitch == 'slst': stitch = 'sl'
             found.append((m.start(), int(m.group(3)), stitch))
 
-        # Pattern C: самотній символ без сусідньої цифри впритул
-        # Йде після D, але при dedup D перемагає завдяки більшому count
         for k in KNOWN_ORDERED:
             for m in re.finditer(r'\b' + k + r'\b', lower):
                 pos = m.start()
@@ -94,7 +121,6 @@ def expand_symbols(symbols: list) -> list:
                     found.append((pos, 1, stitch))
 
         if found:
-            # При однаковій позиції — більший count перемагає (Pattern D > Pattern C)
             seen_pos = set()
             unique = []
             for pos, count, stitch in sorted(found, key=lambda x: (-x[1], x[0])):
@@ -143,7 +169,6 @@ def fix_chart_types(pattern: dict) -> dict:
                 continue
             name = section.get("name", "")
             rounds = section.get("rounds", [])
-            # Розгортаємо symbols у кожному раунді
             for r in rounds:
                 if isinstance(r, dict) and "symbols" in r:
                     r["symbols"] = expand_symbols(r["symbols"])
@@ -372,10 +397,18 @@ def root():
 
 
 @app.post("/api/generate")
-def generate_pattern(request: GenerateRequest):
+def generate_pattern(request: GenerateRequest, authorization: str = Header(...)):
+    # Перевіряємо ліміт і списуємо генерацію через Edge Function
+    increment_generations(authorization, amount=1.0)
+
+    # Читаємо план для вибору моделі
+    profile = get_user_profile(authorization)
+    plan = profile.get("plan", "free")
+    model = PLAN_MODELS.get(plan, "claude-haiku-4-5-20251001")
+
     try:
         message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=model,
             max_tokens=8192,
             system=SYSTEM_PROMPT,
             messages=[
@@ -400,6 +433,8 @@ def generate_pattern(request: GenerateRequest):
 
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"Invalid JSON from Claude: {str(e)}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -432,6 +467,14 @@ def generate_svg(request: SvgRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/founder-slots")
+def founder_slots():
+    anon_client: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    result = anon_client.table("profiles").select("id", count="exact").eq("plan", "founder").execute()
+    used = result.count or 0
+    return {"slots_remaining": max(0, 100 - used)}
 
 
 @app.get("/health")
