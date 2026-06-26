@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 import anthropic
@@ -12,9 +12,13 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://magic-crochet-bot.lovable.app"],
+    allow_origins=[
+        "https://magic-crochet-bot.lovable.app",
+        "https://preview--magic-crochet-bot.lovable.app",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -397,7 +401,10 @@ def root():
 
 
 @app.post("/api/generate")
-def generate_pattern(request: GenerateRequest, authorization: str = Header(...)):
+def generate_pattern(request_body: GenerateRequest, request: Request):
+    authorization = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
     # Перевіряємо ліміт і списуємо генерацію через Edge Function
     increment_generations(authorization, amount=1.0)
 
@@ -414,7 +421,7 @@ def generate_pattern(request: GenerateRequest, authorization: str = Header(...))
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request.idea}\nDifficulty: {request.difficulty}\nSize / scale: {request.size}\nIMPORTANT: Use {request.units} for ALL measurements. Gauge must be in {request.units}. Finished size must be in {request.units}. Do not use any other unit of measurement.\n\nReturn ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nSize / scale: {request_body.size}\nIMPORTANT: Use {request_body.units} for ALL measurements. Gauge must be in {request_body.units}. Finished size must be in {request_body.units}. Do not use any other unit of measurement.\n\nReturn ONLY the JSON object."
                 }
             ]
         )
