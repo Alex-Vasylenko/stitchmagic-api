@@ -472,9 +472,9 @@ def generate_svg(request: SvgRequest):
 @app.get("/api/founder-slots")
 def founder_slots():
     anon_client: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    result = anon_client.table("profiles").select("id", count="exact").eq("plan", "founder").execute()
-    used = result.count or 0
-    return {"slots_remaining": max(0, 100 - used)}
+    result = anon_client.rpc("get_founder_slots_remaining").execute()
+    slots = result.data if result.data is not None else 100
+    return {"slots_remaining": slots}
 
 
 @app.get("/health")
