@@ -6,6 +6,7 @@ from supabase import create_client, Client
 import httpx
 import os
 import json
+import re
 
 app = FastAPI()
 
