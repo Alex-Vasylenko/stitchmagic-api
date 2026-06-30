@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 import anthropic
@@ -11,9 +11,10 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://magic-crochet-bot.lovable.app"],
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type"],
+    allow_credentials=True,
 )
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -354,8 +355,6 @@ class GenerateRequest(BaseModel):
     difficulty: str = "Easy"
     size: str = Field(default="Standard", max_length=100)
     units: str = "cm"
-    user_id: str = Field(...)
-    access_token: str = Field(...)
 
     @field_validator("idea")
     @classmethod
@@ -398,9 +397,7 @@ def root():
 
 
 @app.post("/api/generate")
-def generate_pattern(request_body: GenerateRequest):
-    authorization = f"Bearer {request_body.access_token}"
-
+def generate_pattern(request_body: GenerateRequest, authorization: str = Header(...)):
     # Перевіряємо ліміт і списуємо генерацію через Edge Function
     increment_generations(authorization, amount=1.0)
 
