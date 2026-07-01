@@ -373,6 +373,8 @@ class GenerateRequest(BaseModel):
     difficulty: str = "Easy"
     size: str = Field(default="Standard", max_length=100)
     units: str = "cm"
+    user_id: str = Field(...)
+    access_token: str = Field(...)
 
     @field_validator("idea")
     @classmethod
@@ -415,9 +417,11 @@ def root():
 
 
 @app.post("/api/generate")
-def generate_pattern(request_body: GenerateRequest, authorization: str = Header(default=None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
+def generate_pattern(request_body: GenerateRequest):
+    if not request_body.access_token:
+        raise HTTPException(status_code=401, detail="Authorization missing")
+
+    authorization = f"Bearer {request_body.access_token}"
 
     # Rate limiting по токену юзера
     check_rate_limit(authorization)
