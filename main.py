@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 import anthropic
@@ -7,14 +7,33 @@ import httpx
 import os
 import json
 import re
+import time
+from collections import defaultdict
 
 app = FastAPI()
 
+# Simple in-memory rate limiter by user token
+_rate_limit_store: dict = defaultdict(list)
+RATE_LIMIT_REQUESTS = 5
+RATE_LIMIT_WINDOW = 60  # seconds
+
+def check_rate_limit(token: str):
+    now = time.time()
+    key = token[-16:]  # використовуємо останні 16 символів токена як ключ
+    timestamps = _rate_limit_store[key]
+    # Прибираємо старі запити
+    timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    _rate_limit_store[key] = timestamps
+    if len(timestamps) >= RATE_LIMIT_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a minute.")
+    timestamps.append(now)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://magic-crochet-bot.lovable.app"],
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type"],
+    allow_credentials=True,
 )
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -355,8 +374,6 @@ class GenerateRequest(BaseModel):
     difficulty: str = "Easy"
     size: str = Field(default="Standard", max_length=100)
     units: str = "cm"
-    user_id: str = Field(...)
-    access_token: str = Field(...)
 
     @field_validator("idea")
     @classmethod
@@ -399,8 +416,9 @@ def root():
 
 
 @app.post("/api/generate")
-def generate_pattern(request_body: GenerateRequest):
-    authorization = f"Bearer {request_body.access_token}"
+def generate_pattern(request_body: GenerateRequest, authorization: str = Header(...)):
+    # Rate limiting по токену юзера
+    check_rate_limit(authorization)
 
     # Перевіряємо ліміт і списуємо генерацію через Edge Function
     increment_generations(authorization, amount=1.0)
