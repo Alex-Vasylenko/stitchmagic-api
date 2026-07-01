@@ -4,3 +4,4 @@ anthropic
 pydantic
 supabase
 httpx
+slowapi
