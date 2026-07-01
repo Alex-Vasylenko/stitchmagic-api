@@ -30,10 +30,9 @@ def check_rate_limit(token: str):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://magic-crochet-bot.lovable.app"],
+    allow_origins=["*"],
     allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type"],
-    allow_credentials=True,
+    allow_headers=["*"],
 )
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -416,7 +415,10 @@ def root():
 
 
 @app.post("/api/generate")
-def generate_pattern(request_body: GenerateRequest, authorization: str = Header(...)):
+def generate_pattern(request_body: GenerateRequest, authorization: str = Header(default=None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+
     # Rate limiting по токену юзера
     check_rate_limit(authorization)
 
