@@ -375,6 +375,7 @@ class GenerateRequest(BaseModel):
     units: str = "cm"
     user_id: str = Field(...)
     access_token: str = Field(...)
+    amount: float = Field(default=1.0, ge=0, le=1)
 
     @field_validator("idea")
     @classmethod
@@ -427,7 +428,7 @@ def generate_pattern(request_body: GenerateRequest):
     check_rate_limit(authorization)
 
     # Перевіряємо ліміт і списуємо генерацію через Edge Function
-    increment_generations(authorization, amount=1.0)
+    increment_generations(authorization, amount=request_body.amount)
 
     # Читаємо план для вибору моделі
     profile = get_user_profile(authorization)
