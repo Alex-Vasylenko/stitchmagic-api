@@ -238,6 +238,7 @@ CRITICAL RULES:
 - Use standard US crochet terminology and abbreviations.
 - Every row/round must have a stitch count in parentheses.
 - Include gauge, materials, and finished measurements.
+- For yarn, always specify a REAL yarn brand and name (e.g. "Drops Safran", "Lion Brand Pound of Love", "Paintbox Simply DK"). Match yarn weight to the item difficulty and size. Never just write "yarn" or a weight category like "worsted".
 - Yarn yardage estimates must be realistic for the item and yarn weight.
 - Patterns must be suitable for the stated difficulty level.
 - Choose realistic yarn colors that match the item description.
@@ -294,7 +295,7 @@ JSON structure:
   "finished_size": "dimensions",
   "gauge": "X sc = X inches",
   "materials": {
-    "yarn_weight": "weight",
+    "yarn_weight": "specific yarn name and weight, e.g. 'Paintbox Simply DK' or 'Lion Brand Pound of Love Worsted'",
     "yarn_yardage": 100,
     "hook_size": "size",
     "extras": ["item1"]
