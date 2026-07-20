@@ -49,6 +49,14 @@ PLAN_MODELS = {
     "studio": "claude-sonnet-4-6",
 }
 
+# Вартість Try again по планах — визначається ТІЛЬКИ на бекенді
+PLAN_RETRY_COSTS = {
+    "free": 0.5,
+    "pro": 0.25,
+    "founder": 0.25,
+    "studio": 0.1,
+}
+
 
 def get_user_profile(authorization: str):
     token = authorization.replace("Bearer ", "")
@@ -376,7 +384,7 @@ class GenerateRequest(BaseModel):
     size: str = Field(default="Standard", max_length=100)
     units: str = "cm"
     user_id: str = Field(...)
-    amount: float = Field(default=1.0, ge=0, le=1)
+    is_retry: bool = Field(default=False)
 
     @field_validator("idea")
     @classmethod
@@ -431,13 +439,16 @@ def generate_pattern(
     # Rate limiting по токену юзера
     check_rate_limit(auth_header)
 
-    # Перевіряємо ліміт і списуємо генерацію через Edge Function
-    increment_generations(auth_header, amount=request_body.amount)
-
-    # Читаємо план для вибору моделі
+    # Читаємо план для вибору моделі і розрахунку вартості
     profile = get_user_profile(auth_header)
     plan = profile.get("plan", "free")
     model = PLAN_MODELS.get(plan, "claude-haiku-4-5-20251001")
+
+    # Вартість визначає ТІЛЬКИ бекенд: звичайна генерація = 1.0, Try again = за планом
+    amount = PLAN_RETRY_COSTS.get(plan, 1.0) if request_body.is_retry else 1.0
+
+    # Перевіряємо ліміт і списуємо генерацію через Edge Function
+    increment_generations(auth_header, amount=amount)
 
     try:
         message = client.messages.create(
