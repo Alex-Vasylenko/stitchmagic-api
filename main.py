@@ -9,7 +9,7 @@ import json
 import re
 import time
 from collections import defaultdict
-from typing import Optional
+from typing import Optional  # використовується для authorization header
 
 app = FastAPI()
 
@@ -376,7 +376,6 @@ class GenerateRequest(BaseModel):
     size: str = Field(default="Standard", max_length=100)
     units: str = "cm"
     user_id: str = Field(...)
-    access_token: Optional[str] = Field(default=None)  # тепер опціональний — токен може йти з header
     amount: float = Field(default=1.0, ge=0, le=1)
 
     @field_validator("idea")
@@ -424,14 +423,10 @@ def generate_pattern(
     request_body: GenerateRequest,
     authorization: Optional[str] = Header(default=None)
 ):
-    # Новий шлях: токен з Authorization header
-    # Старий шлях (fallback): токен з body (для зворотної сумісності поки фронт не оновлено)
-    if authorization and authorization.startswith("Bearer "):
-        auth_header = authorization
-    elif request_body.access_token:
-        auth_header = f"Bearer {request_body.access_token}"
-    else:
+    # Токен з Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authorization missing")
+    auth_header = authorization
 
     # Rate limiting по токену юзера
     check_rate_limit(auth_header)
