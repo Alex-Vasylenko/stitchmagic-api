@@ -31,13 +31,9 @@ def check_rate_limit(token: str):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://magic-crochet-bot.lovable.app",
-        "https://*.lovable.app",
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "x-client-info", "apikey"],
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
