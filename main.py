@@ -8,6 +8,8 @@ import os
 import json
 import re
 import time
+import base64
+import hashlib
 from collections import defaultdict
 from typing import Optional  # використовується для authorization header
 
@@ -18,9 +20,32 @@ _rate_limit_store: dict = defaultdict(list)
 RATE_LIMIT_REQUESTS = 5
 RATE_LIMIT_WINDOW = 60  # seconds
 
+def _rate_limit_key(token: str) -> str:
+    """
+    Ключ лічильника — user_id з JWT, а не хвіст токена.
+
+    Раніше ключем були останні 16 символів токена. Повторний логін давав новий
+    токен, отже новий ключ, отже чистий лічильник — ліміт обходився за секунду
+    (BUG-008, кейс 14.3). Підпис тут НЕ перевіряється і не має перевірятись:
+    це лише групування запитів. Справжня автентифікація — далі, у
+    get_user_profile через Supabase.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        sub = json.loads(base64.urlsafe_b64decode(payload)).get("sub")
+        if sub:
+            return f"u:{sub}"
+    except Exception:
+        pass
+    # Токен нечитабельний (битий або не JWT) — все одно рахуємо запит,
+    # просто в окремому відрі. Такі запити далі отримають 401.
+    return "t:" + hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
 def check_rate_limit(token: str):
     now = time.time()
-    key = token[-16:]  # використовуємо останні 16 символів токена як ключ
+    key = _rate_limit_key(token)
     timestamps = _rate_limit_store[key]
     # Прибираємо старі запити
     timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
@@ -58,30 +83,72 @@ PLAN_RETRY_COSTS = {
 }
 
 
+def _strip_code_fences(raw: str) -> str:
+    """
+    Прибирає ```json ... ``` навколо відповіді.
+
+    Стара версія робила text.split("```")[1] — при непарній кількості фенсів
+    (модель відкрила блок і не закрила, бо обірвалась) це давало IndexError,
+    тобто 500 замість зрозумілої помилки.
+    """
+    text = (raw or "").strip()
+    if not text.startswith("```"):
+        return text
+    text = text[3:]
+    if text[:4].lower() == "json":
+        text = text[4:]
+    closing = text.rfind("```")
+    if closing != -1:
+        text = text[:closing]
+    return text.strip()
+
+
 def get_user_profile(authorization: str):
     token = authorization.replace("Bearer ", "")
     authed_client: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     authed_client.postgrest.auth(token)
-    user_resp = authed_client.auth.get_user(token)
-    if not user_resp.user:
+    # BUG-001 (кейс 2.4): на битому чи простроченому JWT get_user кидає виняток
+    # бібліотеки, який без обробки перетворювався на 500. Правильна відповідь —
+    # 401: клієнт надіслав невалідні дані, сервер справний. Усі Edge Functions
+    # цього ж продукту обробляють той самий випадок саме так.
+    try:
+        user_resp = authed_client.auth.get_user(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not user_resp or not user_resp.user:
         raise HTTPException(status_code=401, detail="Unauthorized")
     user_id = user_resp.user.id
-    profile_resp = authed_client.table("profiles").select("*").eq("user_id", user_id).single().execute()
-    if not profile_resp.data:
+    try:
+        profile_resp = authed_client.table("profiles").select("*").eq(
+            "user_id", user_id).single().execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if not profile_resp or not profile_resp.data:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile_resp.data
 
 
-def increment_generations(authorization: str, amount: float = 1.0):
-    """Викликає Edge Function для безпечного списування генерацій"""
+def increment_generations(authorization: str, is_retry: bool = False):
+    """
+    Викликає Edge Function для безпечного списування генерацій.
+
+    BUG-004 (кейси 3.4-3.6): раніше сюди слався {"amount": ...}, а функція
+    increment-generations читає з тіла ТІЛЬКИ {"is_retry": bool} і рахує ціну
+    сама. Поле amount ігнорувалось, тож знижка на "Try again" не спрацьовувала
+    жодного разу — списувався повний кредит замість 0.25 / 0.1.
+
+    Ціну навмисно рахує функція, а не бекенд: вона ж перевіряє вікно ретраю
+    (60 хв від останньої повної генерації) і лічильник retry_count_current < 3.
+    PLAN_RETRY_COSTS нижче лишається довідковим — джерело істини у функції.
+    """
     response = httpx.post(
         EDGE_FUNCTION_URL,
         headers={
             "Authorization": authorization,
             "Content-Type": "application/json",
         },
-        json={"amount": amount},
-        timeout=10.0,
+        json={"is_retry": bool(is_retry)},
+        timeout=15.0,
     )
     if response.status_code == 402:
         raise HTTPException(status_code=402, detail="Generation limit reached")
@@ -444,16 +511,20 @@ def generate_pattern(
     plan = profile.get("plan", "free")
     model = PLAN_MODELS.get(plan, "claude-haiku-4-5-20251001")
 
-    # Вартість визначає ТІЛЬКИ бекенд: звичайна генерація = 1.0, Try again = за планом
-    amount = PLAN_RETRY_COSTS.get(plan, 1.0) if request_body.is_retry else 1.0
-
-    # Перевіряємо ліміт і списуємо генерацію через Edge Function
-    increment_generations(auth_header, amount=amount)
+    # Вартість рахує Edge Function increment-generations: вона єдина бачить
+    # last_full_generation_at і retry_count_current, тобто може перевірити, що
+    # ретрай справді йде за реальною генерацією, а не є способом отримати
+    # знижку на кожну. Прапорець від клієнта сам по собі знижки не дає.
+    increment_generations(auth_header, is_retry=request_body.is_retry)
 
     try:
         message = client.messages.create(
             model=model,
-            max_tokens=8192,
+            # Кейси 3.12 і 3.16: при 8192 довгі патерни і неанглійські запити
+            # обривались на середині JSON, і користувач отримував 500 після
+            # того, як кредит уже списано. Кирилиця коштує втричі більше
+            # токенів на той самий текст, тому впиралась у стелю першою.
+            max_tokens=16384,
             system=SYSTEM_PROMPT,
             messages=[
                 {
@@ -463,20 +534,52 @@ def generate_pattern(
             ]
         )
 
-        text = message.content[0].text.strip()
+        # Обрив по стелі токенів діагностуємо ЯВНО. Раніше він проявлявся як
+        # "Invalid JSON from Claude" десь на 24-тисячному символі, і причина
+        # була неочевидна ні в логах, ні користувачу.
+        if getattr(message, "stop_reason", None) == "max_tokens":
+            raise HTTPException(
+                status_code=503,
+                detail="Pattern too large to generate. Try a simpler idea or a smaller size.",
+            )
 
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-
+        text = _strip_code_fences(message.content[0].text)
         pattern = json.loads(text)
         pattern = fix_chart_types(pattern)
 
         return {"pattern": pattern}
 
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Invalid JSON from Claude: {str(e)}")
+    except json.JSONDecodeError:
+        # Кредит уже списано до виклику моделі, тож користувач за цю генерацію
+        # заплатив. Даємо ще одну спробу за наш рахунок замість того, щоб
+        # повертати помилку на оплачений запит.
+        try:
+            retry_message = client.messages.create(
+                model=model,
+                max_tokens=16384,
+                system=SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nSize / scale: {request_body.size}\nIMPORTANT: Use {request_body.units} for ALL measurements. Keep the pattern compact: no more than 8 sections. Return ONLY the JSON object, nothing else."
+                    }
+                ],
+            )
+            if getattr(retry_message, "stop_reason", None) == "max_tokens":
+                raise HTTPException(
+                    status_code=503,
+                    detail="Pattern too large to generate. Try a simpler idea or a smaller size.",
+                )
+            pattern = json.loads(_strip_code_fences(retry_message.content[0].text))
+            pattern = fix_chart_types(pattern)
+            return {"pattern": pattern}
+        except HTTPException:
+            raise
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not build a valid pattern this time. Please try again. ({e.msg})",
+            )
     except HTTPException:
         raise
     except Exception as e:
