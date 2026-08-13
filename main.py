@@ -297,6 +297,34 @@ def fix_chart_types(pattern: dict) -> dict:
     return pattern
 
 
+def ensure_assembly(pattern: dict) -> dict:
+    """
+    Робить відсутню збірку видимою.
+
+    Модель час від часу повертає патерн із кількох деталей і порожнім assembly —
+    користувач отримує сім шматків і жодної підказки, як їх з'єднати. Мовчки це
+    пропускати не можна: краще явна позначка в патерні, ніж PDF, у якому просто
+    немає розділу.
+    """
+    try:
+        sections = pattern.get("sections") or []
+        assembly = pattern.get("assembly") or []
+        assembly = [str(s).strip() for s in assembly if str(s).strip()]
+        if len(sections) > 1 and not assembly:
+            names = [s.get("name", "?") for s in sections if isinstance(s, dict)]
+            pattern["assembly"] = [
+                "Assembly steps were not generated for this pattern. "
+                "Pieces to join: " + ", ".join(names) + ".",
+                "Sew the pieces together with mattress stitch, stuff firmly "
+                "before closing the final seam, and weave in all ends.",
+            ]
+        else:
+            pattern["assembly"] = assembly
+    except Exception:
+        pass
+    return pattern
+
+
 def sanitize_svg(svg: str):
     try:
         svg = svg.replace("\n", "").replace("\r", "").replace("\t", "").strip()
@@ -310,6 +338,10 @@ def sanitize_svg(svg: str):
 SYSTEM_PROMPT = """You are an expert crochet pattern designer. When given a description, generate a complete, accurate crochet pattern in strict JSON format.
 
 CRITICAL RULES:
+- ASSEMBLY IS MANDATORY. If the pattern has more than one section, the
+  "assembly" array MUST be filled with concrete steps saying WHICH piece
+  goes WHERE, with position and orientation, plus stuffing and closing.
+  A pattern without assembly steps is unusable and counts as invalid output.
 - Stitch counts MUST be mathematically correct. Double-check every increase/decrease round.
 - Use standard US crochet terminology and abbreviations.
 - Every row/round must have a stitch count in parentheses.
@@ -556,7 +588,7 @@ def generate_pattern(
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nREQUIRED FINISHED SIZE: {request_body.size} — the finished piece must actually measure this. Derive stitch counts from the gauge to reach it.\nIMPORTANT: Use {request_body.units} for ALL measurements. Gauge must be in {request_body.units}. Finished size must be in {request_body.units}. Do not use any other unit of measurement.\n\nReturn ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nREQUIRED FINISHED SIZE: {request_body.size} — the finished piece must actually measure this. Derive stitch counts from the gauge to reach it.\nIMPORTANT: Use {request_body.units} for ALL measurements. Gauge must be in {request_body.units}. Finished size must be in {request_body.units}. Do not use any other unit of measurement.\n\nEvery separate piece must be listed in assembly with its exact position on the main piece. Return ONLY the JSON object."
                 }
             ]
         )
@@ -573,6 +605,7 @@ def generate_pattern(
         text = _strip_code_fences(message.content[0].text)
         pattern = json.loads(text)
         pattern = fix_chart_types(pattern)
+        pattern = ensure_assembly(pattern)
 
         return {"pattern": pattern}
 
