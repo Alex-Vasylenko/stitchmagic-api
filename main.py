@@ -338,6 +338,33 @@ CRITICAL RULES:
   fpdc (front post dc), bpdc (back post dc),
   bobble, shell, cluster, picot
 
+SIZE AND SHAPE RULES:
+- The requested size is a REQUIREMENT, not a hint. If the user asks for ~20 cm,
+  the finished piece must measure approximately 20 cm at its largest dimension.
+  Compute the stitch counts from the stated gauge so that the result actually
+  reaches that size, and make finished_size reflect the real computed value.
+- Before writing rounds, check: at the given gauge, does the final stitch count
+  produce the requested size? If not, adjust the number of increase rounds.
+- Reproduce the SHAPE the user describes. A house-shaped pillow means a
+  house silhouette, not a circle with a house appliqued on it. Only fall back to
+  a simple geometric base when the description genuinely calls for one.
+
+ROW NUMBERING:
+- Number rows WITHIN each section, starting from 1 in every section.
+  Do NOT continue numbering across sections. Section "Body" rows 1..12,
+  then section "Stem" rows 1..3 — not 13..15.
+
+ASSEMBLY RULES:
+- assembly is mandatory whenever the pattern has more than one section, and it
+  must be specific enough to act on. Each step names WHICH piece goes WHERE,
+  with position and orientation.
+  GOOD: "Center the Roof triangle on the upper third of the Front Face, aligning
+         its base with round 8, and sew with mattress stitch."
+  BAD:  "Sew the roof onto the front."
+- Cover every section that is not the base piece. If a piece is made twice
+  (two ears, two windows), say where each one goes.
+- Mention stuffing and closing as separate steps where relevant.
+
 CHART RULES:
 - increases array: list the INDEX positions where inc stitches occur in that round
 - decreases array: list the INDEX positions where dec stitches occur
@@ -529,7 +556,7 @@ def generate_pattern(
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nSize / scale: {request_body.size}\nIMPORTANT: Use {request_body.units} for ALL measurements. Gauge must be in {request_body.units}. Finished size must be in {request_body.units}. Do not use any other unit of measurement.\n\nReturn ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nREQUIRED FINISHED SIZE: {request_body.size} — the finished piece must actually measure this. Derive stitch counts from the gauge to reach it.\nIMPORTANT: Use {request_body.units} for ALL measurements. Gauge must be in {request_body.units}. Finished size must be in {request_body.units}. Do not use any other unit of measurement.\n\nReturn ONLY the JSON object."
                 }
             ]
         )
