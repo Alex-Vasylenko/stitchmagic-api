@@ -103,6 +103,21 @@ def _strip_code_fences(raw: str) -> str:
     return text.strip()
 
 
+def _stream_message(**kwargs):
+    """
+    Виклик моделі зі стрімом.
+
+    Без стріму з'єднання мовчить до самого кінця генерації, і проміжний проксі
+    рве його по таймауту простою — саме звідси обриви на 5-6 хвилині. Зі стрімом
+    дані течуть постійно, тож з'єднання лишається живим скільки треба.
+
+    Повертає готовий Message, тож решта коду (перевірка stop_reason, читання
+    content[0].text) працює без змін.
+    """
+    with client.messages.stream(**kwargs) as stream:
+        return stream.get_final_message()
+
+
 def get_user_profile(authorization: str):
     token = authorization.replace("Bearer ", "")
     authed_client: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -403,11 +418,17 @@ CHART RULES:
 - shape_change per round: expanding if stitch count grows, decreasing if it shrinks, straight if same as previous
 - notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc)
 - Be precise about increase/decrease positions - they must match the symbols array
-- CRITICAL: symbols array MUST contain individual stitch codes only.
-  Each element = one stitch. Use: sc, dc, hdc, tr, ch, sl, inc, dec, fpdc, bpdc, mr
-  NEVER put descriptions like "3 dc in ring" or "ch-2 sp" as single elements.
-  CORRECT: ["sc","sc","sc","dc","dc","ch","ch"]
-  WRONG:   ["3 sc", "2 dc in ring", "ch-2 sp"]
+- symbols array: use COMPACT run-length notation. Write "<count> <stitch>" for
+  consecutive identical stitches instead of repeating them one by one. The
+  server expands this automatically, so a round of 26 single crochets is
+  ["26 sc"], not twenty-six separate entries.
+  Allowed stitch codes: sc, dc, hdc, tr, ch, sl, inc, dec, fpdc, bpdc, mr
+  CORRECT: ["mr", "6 sc"]
+  CORRECT: ["dec", "22 sc", "dec"]
+  CORRECT: ["3 sc", "inc", "3 sc", "inc"]
+  WRONG:   ["sc","sc","sc","sc","sc","sc", ...twenty more...]
+  WRONG:   ["2 dc in ring", "ch-2 sp"]   (prose, not a stitch code)
+  Keep the total stitch count implied by symbols equal to stitch_count.
 - For chart type follow this STRICT decision tree — check in this exact order:
 
   STEP 1: Does round 1 notes contain "magic ring"?
@@ -470,7 +491,7 @@ JSON structure:
             "stitch_count": 6,
             "shape_change": "expanding",
             "color_name": "Main color",
-            "symbols": ["sc","sc","sc","sc","sc","sc"],
+            "symbols": ["mr", "6 sc"],
             "increases": [0, 2, 4],
             "decreases": [],
             "notes": "magic ring start"
@@ -577,7 +598,7 @@ def generate_pattern(
     increment_generations(auth_header, is_retry=request_body.is_retry)
 
     try:
-        message = client.messages.create(
+        message = _stream_message(
             model=model,
             # Кейси 3.12 і 3.16: при 8192 довгі патерни і неанглійські запити
             # обривались на середині JSON, і користувач отримував 500 після
@@ -614,7 +635,7 @@ def generate_pattern(
         # заплатив. Даємо ще одну спробу за наш рахунок замість того, щоб
         # повертати помилку на оплачений запит.
         try:
-            retry_message = client.messages.create(
+            retry_message = _stream_message(
                 model=model,
                 max_tokens=16384,
                 system=SYSTEM_PROMPT,
