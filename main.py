@@ -143,7 +143,7 @@ def get_user_profile(authorization: str):
     return profile_resp.data
 
 
-def increment_generations(authorization: str, is_retry: bool = False):
+def increment_generations(authorization: str, is_retry: bool = False, dry_run: bool = False):
     """
     Викликає Edge Function для безпечного списування генерацій.
 
@@ -162,7 +162,7 @@ def increment_generations(authorization: str, is_retry: bool = False):
             "Authorization": authorization,
             "Content-Type": "application/json",
         },
-        json={"is_retry": bool(is_retry)},
+        json={"is_retry": bool(is_retry), "dry_run": bool(dry_run)},
         timeout=15.0,
     )
     if response.status_code == 402:
@@ -170,6 +170,23 @@ def increment_generations(authorization: str, is_retry: bool = False):
     if response.status_code != 200:
         raise HTTPException(status_code=500, detail="Failed to update generations")
     return response.json()
+
+
+def charge_after_success(authorization: str, is_retry: bool = False):
+    """
+    Списання після того, як патерн готовий.
+
+    Тут навмисно НЕ кидаємо помилку: патерн уже згенеровано і користувач має
+    його отримати. Єдиний реалістичний шлях сюди з помилкою — гонка двох
+    одночасних генерацій, яка коштує нам один зайвий запит до моделі, не більше.
+    """
+    try:
+        return increment_generations(authorization, is_retry=is_retry, dry_run=False)
+    except HTTPException as e:
+        print(f"[charge] списання не пройшло після успішної генерації: {e.detail}")
+    except Exception as e:
+        print(f"[charge] списання не пройшло після успішної генерації: {e}")
+    return None
 
 
 def expand_symbols(symbols: list) -> list:
@@ -595,7 +612,9 @@ def generate_pattern(
     # last_full_generation_at і retry_count_current, тобто може перевірити, що
     # ретрай справді йде за реальною генерацією, а не є способом отримати
     # знижку на кожну. Прапорець від клієнта сам по собі знижки не дає.
-    increment_generations(auth_header, is_retry=request_body.is_retry)
+    # Перевірка без запису: якщо стежок не вистачає — 402 ще до моделі.
+    # Саме списання йде нижче, після того як патерн реально готовий.
+    increment_generations(auth_header, is_retry=request_body.is_retry, dry_run=True)
 
     try:
         message = _stream_message(
@@ -628,6 +647,7 @@ def generate_pattern(
         pattern = fix_chart_types(pattern)
         pattern = ensure_assembly(pattern)
 
+        charge_after_success(auth_header, is_retry=request_body.is_retry)
         return {"pattern": pattern}
 
     except json.JSONDecodeError:
@@ -653,6 +673,8 @@ def generate_pattern(
                 )
             pattern = json.loads(_strip_code_fences(retry_message.content[0].text))
             pattern = fix_chart_types(pattern)
+            pattern = ensure_assembly(pattern)
+            charge_after_success(auth_header, is_retry=request_body.is_retry)
             return {"pattern": pattern}
         except HTTPException:
             raise
