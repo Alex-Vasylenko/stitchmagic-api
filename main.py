@@ -773,7 +773,7 @@ def generate_pattern(
             retry_message = _stream_message(
                 _label="generate-retry",
                 model=model,
-                max_tokens=16384,
+                max_tokens=32000,
                 system=SYSTEM_PROMPT,
                 messages=[
                     {
@@ -784,7 +784,7 @@ def generate_pattern(
             )
             if getattr(retry_message, "stop_reason", None) == "max_tokens":
                 raise HTTPException(
-                    status_code=503,
+                    status_code=422,
                     detail="Pattern too large to generate. Try a simpler idea or a smaller size.",
                 )
             pattern = json.loads(_strip_code_fences(retry_message.content[0].text))
