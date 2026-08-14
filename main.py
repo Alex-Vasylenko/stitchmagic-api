@@ -737,7 +737,7 @@ def generate_pattern(
             # обривались на середині JSON, і користувач отримував 500 після
             # того, як кредит уже списано. Кирилиця коштує втричі більше
             # токенів на той самий текст, тому впиралась у стелю першою.
-            max_tokens=16384,
+            max_tokens=32000,
             system=SYSTEM_PROMPT,
             messages=[
                 {
@@ -752,7 +752,7 @@ def generate_pattern(
         # була неочевидна ні в логах, ні користувачу.
         if getattr(message, "stop_reason", None) == "max_tokens":
             raise HTTPException(
-                status_code=503,
+                status_code=422,
                 detail="Pattern too large to generate. Try a simpler idea or a smaller size.",
             )
 
