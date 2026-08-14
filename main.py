@@ -105,17 +105,134 @@ def _strip_code_fences(raw: str) -> str:
 
 def _stream_message(**kwargs):
     """
-    Виклик моделі зі стрімом.
+    Виклик моделі зі стрімом + замір часу.
 
-    Без стріму з'єднання мовчить до самого кінця генерації, і проміжний проксі
-    рве його по таймауту простою — саме звідси обриви на 5-6 хвилині. Зі стрімом
-    дані течуть постійно, тож з'єднання лишається живим скільки треба.
+    Без стріму з'єднання мовчить до кінця генерації, і проміжний проксі рве його
+    по таймауту простою — звідси обриви на 5-6 хвилині. Зі стрімом дані течуть
+    постійно.
 
-    Повертає готовий Message, тож решта коду (перевірка stop_reason, читання
-    content[0].text) працює без змін.
+    Системний промпт позначається cache_control: ephemeral. Він однаковий для
+    всіх запитів, тож після першого виклику модель бере його з кешу — трохи
+    швидше і помітно дешевше.
+
+    Лог: час до першого токена окремо від загального. Якщо перший токен іде
+    довго, вузьке місце — вхід (промпт, черга). Якщо перший токен швидко, а
+    загальний час великий, вузьке місце — обсяг виводу.
     """
+    system = kwargs.get("system")
+    if isinstance(system, str):
+        kwargs["system"] = [{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    label = kwargs.pop("_label", "generate")
+    started = time.time()
+    first_token_at = None
+
     with client.messages.stream(**kwargs) as stream:
-        return stream.get_final_message()
+        for _ in stream.text_stream:
+            if first_token_at is None:
+                first_token_at = time.time()
+        message = stream.get_final_message()
+
+    total = time.time() - started
+    ttft = (first_token_at - started) if first_token_at else total
+    usage = getattr(message, "usage", None)
+    print(
+        "[timing] %s model=%s ttft=%.1fs total=%.1fs in=%s out=%s cache_read=%s stop=%s"
+        % (
+            label,
+            kwargs.get("model"),
+            ttft,
+            total,
+            getattr(usage, "input_tokens", "?"),
+            getattr(usage, "output_tokens", "?"),
+            getattr(usage, "cache_read_input_tokens", "?"),
+            getattr(message, "stop_reason", "?"),
+        ),
+        flush=True,
+    )
+    return message
+
+
+def enrich_chart(pattern: dict) -> dict:
+    """
+    Заповнює обчислювані поля чарта на сервері.
+
+    Модель більше не пише round, shape_change, color_name, increases і
+    decreases — це економить значну частину виводу, а отже часу. Все воно
+    однозначно виводиться з stitch_count і вже розгорнутого symbols.
+
+    Викликати ПІСЛЯ fix_chart_types(): та розгортає компактний запис "26 sc"
+    у список окремих петель, а increases/decreases — це індекси саме в
+    розгорнутому списку.
+
+    Якщо модель усе-таки прислала ці поля — вони не чіпаються.
+    """
+    try:
+        chart = pattern.get("chart")
+        if not isinstance(chart, dict):
+            return pattern
+        sections = chart.get("sections")
+        if not isinstance(sections, list):
+            return pattern
+
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            section_color = section.get("color_name")
+            rounds = section.get("rounds")
+            if not isinstance(rounds, list):
+                continue
+            prev_count = None
+            for i, r in enumerate(rounds):
+                if not isinstance(r, dict):
+                    continue
+
+                if not r.get("round"):
+                    r["round"] = i + 1
+
+                if not r.get("color_name") and section_color:
+                    r["color_name"] = section_color
+
+                symbols = r.get("symbols")
+                symbols = symbols if isinstance(symbols, list) else []
+
+                if "increases" not in r or not isinstance(r.get("increases"), list):
+                    r["increases"] = [j for j, s in enumerate(symbols) if str(s).lower() == "inc"]
+                if "decreases" not in r or not isinstance(r.get("decreases"), list):
+                    r["decreases"] = [j for j, s in enumerate(symbols) if str(s).lower() == "dec"]
+
+                count = r.get("stitch_count")
+                count = count if isinstance(count, (int, float)) else None
+                if not r.get("shape_change"):
+                    if prev_count is None or count is None:
+                        r["shape_change"] = "expanding" if r["increases"] else "straight"
+                    elif count > prev_count:
+                        r["shape_change"] = "expanding"
+                    elif count < prev_count:
+                        r["shape_change"] = "decreasing"
+                    else:
+                        r["shape_change"] = "straight"
+                if count is not None:
+                    prev_count = count
+
+            if not section.get("shape_change"):
+                counts = [
+                    r.get("stitch_count") for r in rounds
+                    if isinstance(r, dict) and isinstance(r.get("stitch_count"), (int, float))
+                ]
+                if len(counts) >= 2 and counts[-1] > counts[0]:
+                    section["shape_change"] = "expanding"
+                elif len(counts) >= 2 and counts[-1] < counts[0]:
+                    section["shape_change"] = "decreasing"
+                else:
+                    section["shape_change"] = "straight"
+    except Exception:
+        pass
+    return pattern
 
 
 def get_user_profile(authorization: str):
@@ -430,11 +547,12 @@ ASSEMBLY RULES:
 - Mention stuffing and closing as separate steps where relevant.
 
 CHART RULES:
-- increases array: list the INDEX positions where inc stitches occur in that round
-- decreases array: list the INDEX positions where dec stitches occur
-- shape_change per round: expanding if stitch count grows, decreasing if it shrinks, straight if same as previous
-- notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc)
-- Be precise about increase/decrease positions - they must match the symbols array
+- Each round object contains ONLY these three keys: stitch_count, symbols, notes.
+  Do NOT write "round", "shape_change", "color_name", "increases" or "decreases" —
+  the server derives all of them from symbols and stitch_count. Writing them
+  wastes output and is ignored.
+- notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc).
+  Leave notes as an empty string when there is nothing special.
 - symbols array: use COMPACT run-length notation. Write "<count> <stitch>" for
   consecutive identical stitches instead of repeating them one by one. The
   server expands this automatically, so a round of 26 single crochets is
@@ -504,13 +622,8 @@ JSON structure:
         "shape_change": "expanding|decreasing|straight",
         "rounds": [
           {
-            "round": 1,
             "stitch_count": 6,
-            "shape_change": "expanding",
-            "color_name": "Main color",
             "symbols": ["mr", "6 sc"],
-            "increases": [0, 2, 4],
-            "decreases": [],
             "notes": "magic ring start"
           }
         ]
@@ -618,6 +731,7 @@ def generate_pattern(
 
     try:
         message = _stream_message(
+            _label="generate",
             model=model,
             # Кейси 3.12 і 3.16: при 8192 довгі патерни і неанглійські запити
             # обривались на середині JSON, і користувач отримував 500 після
@@ -645,6 +759,7 @@ def generate_pattern(
         text = _strip_code_fences(message.content[0].text)
         pattern = json.loads(text)
         pattern = fix_chart_types(pattern)
+        pattern = enrich_chart(pattern)
         pattern = ensure_assembly(pattern)
 
         charge_after_success(auth_header, is_retry=request_body.is_retry)
@@ -656,6 +771,7 @@ def generate_pattern(
         # повертати помилку на оплачений запит.
         try:
             retry_message = _stream_message(
+                _label="generate-retry",
                 model=model,
                 max_tokens=16384,
                 system=SYSTEM_PROMPT,
@@ -673,6 +789,7 @@ def generate_pattern(
                 )
             pattern = json.loads(_strip_code_fences(retry_message.content[0].text))
             pattern = fix_chart_types(pattern)
+            pattern = enrich_chart(pattern)
             pattern = ensure_assembly(pattern)
             charge_after_success(auth_header, is_retry=request_body.is_retry)
             return {"pattern": pattern}
