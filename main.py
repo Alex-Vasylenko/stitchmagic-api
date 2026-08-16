@@ -642,7 +642,8 @@ def _compute_size(pattern: dict, gauge_pair):
     _, name, across, height, kind = best
     shape = "diameter" if kind in ("round", "cylinder", "cone") else "wide"
     return (f"~{across:.1f} cm {shape}, ~{height:.1f} cm tall "
-            f"(largest piece: {name}; calculated from gauge)")
+            f"(largest piece: {name}; calculated from gauge)",
+            across, height)
 
 
 def _check_assembly_covers_sections(pattern: dict, issues: list):
@@ -787,6 +788,64 @@ def _check_chart_matches_sections(pattern: dict, issues: list):
             })
 
 
+def _check_prose_dimensions(pattern: dict, computed, issues: list):
+    """
+    Шукає розмірні твердження в прозі й звіряє їх з обчисленим.
+
+    Замінити finished_size недостатньо: модель дублює розмір у кроках збірки
+    ("the finished pumpkin should stand approximately 20 cm tall"), і саме це
+    число читає людина. На гарбузі різниця була втричі.
+
+    Беремо лише фрази, де число прямо описує виріб — tall / wide / across /
+    high / long / in diameter. Довжини хвостиків пряжі, розміри гачка й голки
+    сюди не потрапляють, бо коло них таких слів немає.
+    """
+    if not computed:
+        return
+
+    max_cm = max(computed)
+    if max_cm <= 0:
+        return
+
+    dimension_re = re.compile(
+        r"([\d.]+)\s*(cm|centimet\w*|in|inch|inches|\")\s*"
+        r"(tall|high|wide|across|long|in\s+diameter|in\s+width|in\s+height)",
+        re.IGNORECASE)
+
+    def scan(text, where):
+        if not isinstance(text, str):
+            return
+        for match in dimension_re.finditer(text):
+            value = float(match.group(1))
+            if match.group(2).lower().startswith(("in", '"')):
+                value *= 2.54
+            # Цікавлять лише грубі розбіжності: у прозі повно легітимних
+            # довжин, а обчислення теж має похибку через щільність.
+            if value > max_cm * 1.4 or value < max_cm * 0.6:
+                issues.append({
+                    "section": where,
+                    "row": None,
+                    "kind": "size",
+                    "text": (f"the text claims {match.group(0).strip()}, but the "
+                             f"gauge and stitch counts give about "
+                             f"{computed[0]:.1f} cm across and {computed[1]:.1f} cm tall"),
+                })
+                return  # одного зауваження на фрагмент досить
+
+    for index, step in enumerate(pattern.get("assembly") or [], start=1):
+        scan(step, f"Assembly step {index}")
+
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for row in section.get("rows") or []:
+            if isinstance(row, dict):
+                scan(row.get("instruction"), section.get("name"))
+                scan(row.get("notes"), section.get("name"))
+
+    scan(pattern.get("finished_size_stated_by_model"), "stated finished size")
+
+
 def validate_pattern(pattern: dict) -> dict:
     """
     Перевіряє патерн арифметикою і позначає знайдене.
@@ -805,11 +864,15 @@ def validate_pattern(pattern: dict) -> dict:
 
         gauge_pair = _parse_gauge(pattern.get("gauge", ""))
         if gauge_pair:
-            computed = _compute_size(pattern, gauge_pair)
-            if computed:
+            result = _compute_size(pattern, gauge_pair)
+            if result:
+                text, across, height = result
                 stated = pattern.get("finished_size")
-                pattern["finished_size"] = computed
+                pattern["finished_size"] = text
                 pattern["finished_size_stated_by_model"] = stated
+                # Замінити поле недостатньо: модель дублює розмір прозою
+                # в кроках збірки, і читають саме її.
+                _check_prose_dimensions(pattern, (across, height), issues)
 
         _annotate_rows(pattern, issues)
         _mark_repeated_rows(pattern)
