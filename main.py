@@ -481,32 +481,48 @@ def _parse_gauge(gauge: str):
     """
     Витягує щільність: скільки петель і рядів на сантиметр.
 
-    Формати, що реально трапляються:
-      "10 sc = 5 cm; 10 rows = 5 cm with 5mm hook"
-      "14 sc = 10 cm, 16 rows = 10 cm using 4 mm hook"
-      "4 sc = 2 cm; 4 rows = 2 cm"
-    Повертає (петель_на_см, рядів_на_см) або None, якщо розібрати не вдалось.
+    Модель віддає щільність у кількох різних формах, і жодну з них не гарантує.
+    Комбінований формат ("14 sc x 16 rows = 10 cm x 10 cm") трапляється частіше
+    за роздільний, і саме на ньому розбір спершу ламався — а без щільності не
+    рахується готовий розмір, тобто не працює головна перевірка.
+
+    Повертає (петель_на_см, рядів_на_см) або None.
     """
     if not gauge or not isinstance(gauge, str):
         return None
-    text = gauge.lower().replace(",", ";")
+    text = gauge.lower().replace("\u00d7", "x").replace(",", ";")
+    unit_re = r"(cm|centimet\w*|in|inch|inches|\")"
 
+    def to_cm(size: float, unit: str) -> float:
+        return size * 2.54 if unit.startswith(("in", '"')) else size
+
+    # 1. Комбінований: "14 sc x 16 rows = 10 cm x 10 cm" або "... = 10 cm"
+    m = re.search(
+        r"([\d.]+)\s*(?:sc|sts?|stitches)\s*(?:x|by|and)\s*([\d.]+)\s*rows?"
+        r"\s*=\s*([\d.]+)\s*" + unit_re +
+        r"(?:\s*(?:x|by|and)\s*([\d.]+)\s*" + unit_re + r")?",
+        text)
+    if m:
+        sts_count, rows_count = float(m.group(1)), float(m.group(2))
+        width = to_cm(float(m.group(3)), m.group(4))
+        height = to_cm(float(m.group(5)), m.group(6)) if m.group(5) else width
+        if width > 0 and height > 0:
+            return sts_count / width, rows_count / height
+
+    # 2. Роздільний: "10 sc = 5 cm; 10 rows = 5 cm"
     def one(pattern):
-        m = re.search(pattern, text)
-        if not m:
+        found = re.search(pattern, text)
+        if not found:
             return None
-        count, size, unit = float(m.group(1)), float(m.group(2)), m.group(3)
-        if size <= 0:
-            return None
-        if unit.startswith("in"):
-            size *= 2.54
-        return count / size
+        count, size = float(found.group(1)), float(found.group(2))
+        size = to_cm(size, found.group(3))
+        return count / size if size > 0 else None
 
-    sts = one(r"([\d.]+)\s*(?:sc|sts?|stitches)\s*=\s*([\d.]+)\s*(cm|in|inch|inches)")
-    rows = one(r"([\d.]+)\s*rows?\s*=\s*([\d.]+)\s*(cm|in|inch|inches)")
-    if not sts:
-        return None
-    return sts, (rows or sts)
+    sts = one(r"([\d.]+)\s*(?:sc|sts?|stitches)\s*=\s*([\d.]+)\s*" + unit_re)
+    rows = one(r"([\d.]+)\s*rows?\s*=\s*([\d.]+)\s*" + unit_re)
+    if sts:
+        return sts, (rows or sts)
+    return None
 
 
 def _rows_of(section: dict):
