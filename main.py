@@ -902,6 +902,190 @@ def _check_prose_dimensions(pattern: dict, computed, issues: list):
 
 
 
+def _count_from_instruction(text, previous):
+    """
+    Рахує петлі з тексту інструкції — незалежно від заявлених чисел.
+
+    Потрібне, щоб при розбіжності між текстом і діаграмою можна було сказати,
+    хто з них правий, а не лише що вони не сходяться.
+
+    Повертає число або None, якщо ряд описаний прозою. Ланцюжок (ch) до петель
+    не рахується: це основа, а не стібки ряду.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    body = text.lower()
+    body = re.sub(r"\(\s*\d+[^)]*\)\s*$", " ", body)   # прибрати заявлене "(30)"
+    # Прибрати фразу приєднання: "sl st to first sc to join" — це не нові петлі,
+    # а вказівка, куди приєднатись. Згадане там "sc" рахувалось як стібок і
+    # давало 8 замість 6 у першому ряду з магічним кільцем.
+    body = re.sub(r"sl\s*st\b[^,.;]*\bjoin\b", " ", body)
+
+    STITCH = r"(?:sc2tog|dc2tog|hdc2tog|fpdc|bpdc|slst|sl\s*st|hdc|sc|dc|tr|inc|dec)"
+
+    def value_of(name, count):
+        clean = re.sub(r"\s+", "", name)
+        if clean == "inc":
+            return count * 2          # приріст: дві петлі з однієї
+        return count                  # спад дає одну; решта — як є
+
+    # 1. Повтор блоку: "*sc 3, inc* repeat 6 times" / "*sc 3, inc* x6"
+    repeat = re.search(
+        r"\*(?P<block>[^*]+)\*\s*(?:rep(?:eat)?(?:\s+from\s*\*)?\s*)?"
+        r"(?:around\s*)?(?:x\s*)?(?P<times>\d+)\s*(?:times)?", body)
+    if repeat:
+        per_block = 0
+        found = False
+        for m in re.finditer(rf"(?:(\d+)\s*)?\b({STITCH})\b(?:\s*(\d+))?",
+                             repeat.group("block")):
+            per_block += value_of(m.group(2), int(m.group(1) or m.group(3) or 1))
+            found = True
+        if found and per_block > 0:
+            return per_block * int(repeat.group("times"))
+
+    # 2. Проста дія на весь ряд — рахується від попереднього
+    if previous:
+        if re.search(r"\binc\b[^.]{0,20}\b(?:in\s+)?each\b", body):
+            return previous * 2
+        shrink = re.search(r"\b(?:dec|sc2tog)\b\s*(\d+)\s*times", body)
+        if shrink:
+            return previous - int(shrink.group(1))
+        if re.search(r"\b(?:sc|dc|hdc)\b[^.]{0,20}\b(?:in\s+)?each\s+st", body):
+            return previous
+
+    # 3. Перелік стібків підряд
+    listed = re.findall(rf"(?:(\d+)\s*)?\b({STITCH})\b(?:\s*(\d+))?", body)
+    if len(listed) >= 3:
+        total = sum(value_of(name, int(a or b or 1)) for a, name, b in listed)
+        if total > 0:
+            return total
+
+    return None
+
+
+def _fix_prose_dimensions(pattern, computed):
+    """
+    Замінює хибні розмірні числа в прозі на обчислені.
+
+    Виправляємо лише розмір, бо тут є одна правильна відповідь: вона виводиться
+    зі щільності й кількості петель, а не з думки моделі. Модель помиляється
+    стабільно — зазвичай подає обхват як діаметр, тобто втричі більше.
+
+    Числа в межах 40% від обчисленого лишаються недоторканими: там і наш
+    розрахунок має похибку, і формулювання "приблизно" виправдане.
+
+    Повертає кількість виправлених місць.
+    """
+    if not computed:
+        return 0
+    across, height = computed
+    if across <= 0 or height <= 0:
+        return 0
+
+    dimension_re = re.compile(
+        r"([\d.]+)\s*(cm|centimet\w*|in|inch|inches|\")\s*"
+        r"(tall|high|wide|across|long|in\s+diameter|in\s+width|in\s+height)",
+        re.IGNORECASE)
+
+    state = {"fixed": 0}
+
+    def swap(match):
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        what = match.group(3).lower()
+        if unit.startswith(("in", '"')) and not what.startswith("in "):
+            value *= 2.54
+        correct = height if re.search(r"tall|high|height", what) else across
+        if abs(value - correct) <= max(correct * 0.4, 0.5):
+            return match.group(0)
+        state["fixed"] += 1
+        return f"{correct:.1f} cm {match.group(3)}"
+
+    def replace_in(text):
+        return dimension_re.sub(swap, text) if isinstance(text, str) and text else text
+
+    if isinstance(pattern.get("assembly"), list):
+        pattern["assembly"] = [replace_in(s) for s in pattern["assembly"]]
+
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for row in section.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            for field in ("instruction", "notes"):
+                if isinstance(row.get(field), str):
+                    row[field] = replace_in(row[field])
+
+    return state["fixed"]
+
+
+def _adjudicate_counts(pattern, issues):
+    """
+    Там, де текст і діаграма розійшлись, каже, хто правий.
+
+    Якщо підрахунок не збігається з жодним — теж повідомляє: три різні числа це
+    саме те, що людині треба знати, щоб перерахувати ряд самій.
+    """
+    chart_counts = {}
+    chart = pattern.get("chart")
+    if isinstance(chart, dict):
+        for section in chart.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            key = str(section.get("name", "")).strip().lower()
+            for rnd in section.get("rounds") or []:
+                if isinstance(rnd, dict) and isinstance(rnd.get("stitch_count"), (int, float)):
+                    chart_counts[(key, rnd.get("round"))] = float(rnd["stitch_count"])
+
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        name = section.get("name", "?")
+        key = str(name).strip().lower()
+        previous = None
+        for row in section.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            number = row.get("row_number")
+            stated = row.get("stitch_count")
+            derived = _count_from_instruction(row.get("instruction", ""), previous)
+            if isinstance(stated, (int, float)):
+                previous = float(stated)
+            if derived is None or not isinstance(stated, (int, float)):
+                continue
+
+            stated = float(stated)
+            in_chart = chart_counts.get((key, number))
+            matches_text = abs(derived - stated) < 0.01
+            matches_chart = in_chart is not None and abs(derived - in_chart) < 0.01
+
+            if in_chart is not None and abs(stated - in_chart) > 0.01:
+                if matches_text or matches_chart:
+                    winner = "written instructions" if matches_text else "chart"
+                    issues.append({
+                        "section": name, "row": number, "kind": "count",
+                        "text": (f"counting the stitches in this row gives {derived:g}, "
+                                 f"which matches the {winner} — the other source is wrong"),
+                    })
+                else:
+                    issues.append({
+                        "section": name, "row": number, "kind": "count",
+                        "text": (f"counting the stitches written in this row gives "
+                                 f"{derived:g}, which matches neither the instructions "
+                                 f"({stated:g}) nor the chart ({in_chart:g})"),
+                    })
+                continue
+
+            if not matches_text:
+                issues.append({
+                    "section": name, "row": number, "kind": "count",
+                    "text": (f"the row says {stated:g} stitches, but counting the "
+                             f"stitches written in it gives {derived:g}"),
+                })
+
+
 def validate_pattern(pattern: dict) -> dict:
     """
     Перевіряє патерн арифметикою і позначає знайдене.
@@ -918,6 +1102,7 @@ def validate_pattern(pattern: dict) -> dict:
         _check_assembly_covers_sections(pattern, issues)
         _check_duplicate_sections(pattern, issues)
         _check_chart_matches_sections(pattern, issues)
+        _adjudicate_counts(pattern, issues)
 
         gauge_pair = _parse_gauge(pattern.get("gauge", ""))
         if gauge_pair:
@@ -929,6 +1114,14 @@ def validate_pattern(pattern: dict) -> dict:
                 pattern["finished_size_stated_by_model"] = stated
                 # Замінити поле недостатньо: модель дублює розмір прозою
                 # в кроках збірки, і читають саме її.
+                # Розмір ВИПРАВЛЯЄМО, а не лише позначаємо: тут є одна
+                # правильна відповідь, обчислена зі щільності. Модель стабільно
+                # подає обхват як діаметр — на гарбузі це давало 20 см замість 6.7.
+                fixed = _fix_prose_dimensions(pattern, (across, height))
+                if fixed:
+                    pattern.setdefault("validation_fixes", []).append(
+                        f"corrected {fixed} size claim(s) in the text to match the "
+                        f"gauge: ~{across:.1f} cm across, ~{height:.1f} cm tall")
                 _check_prose_dimensions(pattern, (across, height), issues)
 
         _annotate_rows(pattern, issues)
