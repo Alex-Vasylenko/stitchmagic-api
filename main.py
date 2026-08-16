@@ -646,8 +646,26 @@ def _compute_size(pattern: dict, gauge_pair):
             across, height)
 
 
+def _core_name(name) -> str:
+    """
+    Назва деталі без уточнень: "Leaf (make 2)" -> "leaf".
+
+    Модель додає до назв дужки з кількістю чи методом, а в кроках збірки пише
+    коротко ("First Leaf", "Pumpkin Ribbed Body"). Порівняння повних назв давало
+    хибні спрацювання.
+    """
+    text = re.sub(r"\([^)]*\)", " ", str(name or ""))
+    text = re.sub(r"\b(?:make|x)\s*\d+\b", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
 def _check_assembly_covers_sections(pattern: dict, issues: list):
-    """Кожна деталь, крім першої, має згадуватись у кроках збірки."""
+    """
+    Кожна деталь, крім першої, має згадуватись у кроках збірки.
+
+    Порівнюємо за назвою без дужок і за окремими словами: у збірці деталь може
+    згадуватись як "First Leaf" там, де секція зветься "Leaf (make 2)".
+    """
     sections = [s.get("name") for s in (pattern.get("sections") or [])
                 if isinstance(s, dict) and s.get("name")]
     if len(sections) < 2:
@@ -655,13 +673,48 @@ def _check_assembly_covers_sections(pattern: dict, issues: list):
     assembly_text = " ".join(str(s) for s in (pattern.get("assembly") or [])).lower()
     if not assembly_text:
         return
-    missing = [n for n in sections[1:] if n.lower() not in assembly_text]
+
+    missing = []
+    for name in sections[1:]:
+        core = _core_name(name)
+        if not core:
+            continue
+        words = [w for w in core.split() if len(w) > 2]
+        if core in assembly_text:
+            continue
+        if words and all(w in assembly_text for w in words):
+            continue
+        missing.append(name)
+
     if missing:
         issues.append({
             "section": None,
             "row": None,
             "kind": "assembly",
             "text": "assembly steps do not mention: " + ", ".join(missing),
+        })
+
+
+def _check_duplicate_sections(pattern: dict, issues: list):
+    """
+    Ловить альтернативні версії однієї деталі.
+
+    Модель інколи дає два корпуси одразу — основний і "Alternative Single-Piece
+    Method". У збірці згадується лише один, другий лишається мертвим вантажем:
+    людина витратить кілька годин на деталь, яка нікуди не йде.
+    """
+    sections = [s.get("name") for s in (pattern.get("sections") or [])
+                if isinstance(s, dict) and s.get("name")]
+    flagged = [n for n in sections
+               if re.search(r"\b(alternative|option|version|variant|method b|instead of)\b",
+                            str(n), re.IGNORECASE)]
+    if flagged:
+        issues.append({
+            "section": None,
+            "row": None,
+            "kind": "structure",
+            "text": ("the pattern offers alternative versions of the same piece ("
+                     + ", ".join(flagged) + ") — only one should be given"),
         })
 
 
@@ -846,6 +899,9 @@ def _check_prose_dimensions(pattern: dict, computed, issues: list):
     scan(pattern.get("finished_size_stated_by_model"), "stated finished size")
 
 
+
+
+
 def validate_pattern(pattern: dict) -> dict:
     """
     Перевіряє патерн арифметикою і позначає знайдене.
@@ -860,6 +916,7 @@ def validate_pattern(pattern: dict) -> dict:
         _check_chart_arithmetic(pattern, issues)
         _check_text_matches_count(pattern, issues)
         _check_assembly_covers_sections(pattern, issues)
+        _check_duplicate_sections(pattern, issues)
         _check_chart_matches_sections(pattern, issues)
 
         gauge_pair = _parse_gauge(pattern.get("gauge", ""))
@@ -906,6 +963,11 @@ def sanitize_svg(svg: str):
 SYSTEM_PROMPT = """You are an expert crochet pattern designer. When given a description, generate a complete, accurate crochet pattern in strict JSON format.
 
 CRITICAL RULES:
+- ONE METHOD PER PIECE. Never give alternative versions of the same piece —
+  no "Alternative Single-Piece Method", no "Option B", no "or you can instead".
+  Choose the best approach and write only that one. Every entry in "sections"
+  must be a separate physical piece the maker actually crochets, and every one
+  of them must appear in the assembly steps.
 - ASSEMBLY IS MANDATORY. If the pattern has more than one section, the
   "assembly" array MUST be filled with concrete steps saying WHICH piece
   goes WHERE, with position and orientation, plus stuffing and closing.
