@@ -713,6 +713,64 @@ def _mark_repeated_rows(pattern: dict):
             prev_key = key
 
 
+def _check_chart_matches_sections(pattern: dict, issues: list):
+    """
+    Звіряє діаграму з текстом: це два описи однієї деталі.
+
+    Знайдено на живому патерні: Leaf у тексті "(7 sts along chain)", у діаграмі
+    "R1 St 14". Кожен опис окремо виглядав несуперечливим, тому попередні
+    перевірки цього не бачили.
+
+    Хто саме правий — не вирішуємо: це вимагало б розуміння техніки. Наша справа
+    показати, що два джерела розходяться, і назвати обидва числа.
+    """
+    chart = pattern.get("chart")
+    if not isinstance(chart, dict):
+        return
+
+    text_rows = {}
+    for section in pattern.get("sections") or []:
+        if isinstance(section, dict) and section.get("name"):
+            key = str(section["name"]).strip().lower()
+            text_rows[key] = {n: c for n, c, _ in _rows_of(section) if n is not None}
+
+    for section in chart.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        name = section.get("name", "?")
+        rows = text_rows.get(str(name).strip().lower())
+        if not rows:
+            continue
+
+        rounds = [r for r in (section.get("rounds") or []) if isinstance(r, dict)]
+
+        for rnd in rounds:
+            number = rnd.get("round")
+            count = rnd.get("stitch_count")
+            if number is None or not isinstance(count, (int, float)):
+                continue
+            in_text = rows.get(number)
+            if in_text is None:
+                continue
+            if abs(float(count) - in_text) > 0.01:
+                issues.append({
+                    "section": name,
+                    "row": number,
+                    "kind": "count",
+                    "text": (f"the written instructions say {in_text:g} stitches "
+                             f"but the chart says {float(count):g}"),
+                })
+
+        if rounds and rows and len(rounds) != len(rows):
+            issues.append({
+                "section": name,
+                "row": None,
+                "kind": "structure",
+                "text": (f"the written instructions have {len(rows)} rows but the "
+                         f"chart has {len(rounds)} — one of them is missing a row"),
+            })
+
+
 def validate_pattern(pattern: dict) -> dict:
     """
     Перевіряє патерн арифметикою і позначає знайдене.
@@ -727,6 +785,7 @@ def validate_pattern(pattern: dict) -> dict:
         _check_chart_arithmetic(pattern, issues)
         _check_text_matches_count(pattern, issues)
         _check_assembly_covers_sections(pattern, issues)
+        _check_chart_matches_sections(pattern, issues)
 
         gauge_pair = _parse_gauge(pattern.get("gauge", ""))
         if gauge_pair:
