@@ -6,6 +6,7 @@ from supabase import create_client, Client
 import httpx
 import os
 import json
+import math
 import re
 import time
 import base64
@@ -474,6 +475,286 @@ def ensure_assembly(pattern: dict) -> dict:
     return pattern
 
 
+# ─────────────────────────── автоматична перевірка ───────────────────────────
+
+def _parse_gauge(gauge: str):
+    """
+    Витягує щільність: скільки петель і рядів на сантиметр.
+
+    Формати, що реально трапляються:
+      "10 sc = 5 cm; 10 rows = 5 cm with 5mm hook"
+      "14 sc = 10 cm, 16 rows = 10 cm using 4 mm hook"
+      "4 sc = 2 cm; 4 rows = 2 cm"
+    Повертає (петель_на_см, рядів_на_см) або None, якщо розібрати не вдалось.
+    """
+    if not gauge or not isinstance(gauge, str):
+        return None
+    text = gauge.lower().replace(",", ";")
+
+    def one(pattern):
+        m = re.search(pattern, text)
+        if not m:
+            return None
+        count, size, unit = float(m.group(1)), float(m.group(2)), m.group(3)
+        if size <= 0:
+            return None
+        if unit.startswith("in"):
+            size *= 2.54
+        return count / size
+
+    sts = one(r"([\d.]+)\s*(?:sc|sts?|stitches)\s*=\s*([\d.]+)\s*(cm|in|inch|inches)")
+    rows = one(r"([\d.]+)\s*rows?\s*=\s*([\d.]+)\s*(cm|in|inch|inches)")
+    if not sts:
+        return None
+    return sts, (rows or sts)
+
+
+def _rows_of(section: dict):
+    """Ряди секції у вигляді (номер, кількість_петель, текст)."""
+    out = []
+    for row in section.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        count = row.get("stitch_count")
+        if isinstance(count, (int, float)):
+            out.append((row.get("row_number"), float(count), row.get("instruction") or ""))
+    return out
+
+
+def _check_chart_arithmetic(pattern: dict, issues: list):
+    """
+    Кількість петель наступного ряду має випливати з попереднього.
+
+    Джерело істини — chart, бо там є increases/decreases списками позицій.
+    prev + len(increases) - len(decreases) має дорівнювати поточному значенню.
+    """
+    chart = pattern.get("chart")
+    if not isinstance(chart, dict):
+        return
+    for section in chart.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        name = section.get("name", "?")
+        prev = None
+        for rnd in section.get("rounds") or []:
+            if not isinstance(rnd, dict):
+                continue
+            count = rnd.get("stitch_count")
+            if not isinstance(count, (int, float)):
+                continue
+            count = float(count)
+            inc = len(rnd.get("increases") or [])
+            dec = len(rnd.get("decreases") or [])
+            if prev is not None and (inc or dec):
+                expected = prev + inc - dec
+                if abs(expected - count) > 0.01:
+                    issues.append({
+                        "section": name,
+                        "row": rnd.get("round"),
+                        "kind": "count",
+                        "text": (f"stitch count {count:g} does not follow from the "
+                                 f"previous round: {prev:g} + {inc} inc - {dec} dec "
+                                 f"= {expected:g}"),
+                    })
+            prev = count
+
+
+def _check_text_matches_count(pattern: dict, issues: list):
+    """
+    Число в дужках наприкінці інструкції має збігатися зі stitch_count.
+
+    Це те, що бачить користувач: якщо в тексті "(30)", а в даних 32, то
+    діаграма і текст розійшлися, і хтось із них бреше.
+    """
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        name = section.get("name", "?")
+        for number, count, text in _rows_of(section):
+            m = re.search(r"\((\d+)(?:\s*sc)?\)\s*$", text.strip())
+            if not m:
+                continue
+            stated = float(m.group(1))
+            if abs(stated - count) > 0.01:
+                issues.append({
+                    "section": name,
+                    "row": number,
+                    "kind": "count",
+                    "text": (f"the instruction says ({stated:g}) but the pattern data "
+                             f"says {count:g} stitches"),
+                })
+
+
+def _compute_size(pattern: dict, gauge_pair):
+    """
+    Рахує готовий розмір зі щільності. Значення моделі не перевіряємо, а
+    замінюємо: вона стабільно подає обхват як діаметр, і це найчастіша
+    помилка з усіх (перевірено на кількох патернах).
+
+    Кругла деталь: найбільший ряд — це обхват, отже діаметр = обхват / пі.
+    Пласка деталь: найбільший ряд — це ширина.
+    """
+    sts_per_cm, rows_per_cm = gauge_pair
+    chart_types = {}
+    chart = pattern.get("chart")
+    if isinstance(chart, dict):
+        for section in chart.get("sections") or []:
+            if isinstance(section, dict):
+                chart_types[section.get("name")] = (section.get("type") or "").lower()
+
+    best = None
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        rows = _rows_of(section)
+        if not rows:
+            continue
+        name = section.get("name", "?")
+        max_sts = max(r[1] for r in rows)
+        kind = chart_types.get(name, "flat")
+        if kind in ("round", "cylinder", "cone"):
+            across = (max_sts / sts_per_cm) / math.pi
+        else:
+            across = max_sts / sts_per_cm
+        height = len(rows) / rows_per_cm
+        largest = max(across, height)
+        if best is None or largest > best[0]:
+            best = (largest, name, across, height, kind)
+
+    if not best:
+        return None
+    _, name, across, height, kind = best
+    shape = "diameter" if kind in ("round", "cylinder", "cone") else "wide"
+    return (f"~{across:.1f} cm {shape}, ~{height:.1f} cm tall "
+            f"(largest piece: {name}; calculated from gauge)")
+
+
+def _check_assembly_covers_sections(pattern: dict, issues: list):
+    """Кожна деталь, крім першої, має згадуватись у кроках збірки."""
+    sections = [s.get("name") for s in (pattern.get("sections") or [])
+                if isinstance(s, dict) and s.get("name")]
+    if len(sections) < 2:
+        return
+    assembly_text = " ".join(str(s) for s in (pattern.get("assembly") or [])).lower()
+    if not assembly_text:
+        return
+    missing = [n for n in sections[1:] if n.lower() not in assembly_text]
+    if missing:
+        issues.append({
+            "section": None,
+            "row": None,
+            "kind": "assembly",
+            "text": "assembly steps do not mention: " + ", ".join(missing),
+        })
+
+
+def _annotate_rows(pattern: dict, issues: list):
+    """
+    Дописує попередження в текст самого ряду.
+
+    Свідомо не додаємо нове поле в структуру: інструкція вже рендериться і на
+    сторінці патерна, і в PDF, тож позначка з'явиться скрізь одразу, без
+    правок на фронтенді.
+    """
+    by_key = {}
+    for issue in issues:
+        if issue["kind"] != "count" or issue["row"] is None:
+            continue
+        by_key.setdefault((issue["section"], issue["row"]), []).append(issue["text"])
+
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        name = section.get("name", "?")
+        for row in section.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            notes = by_key.get((name, row.get("row_number")))
+            if notes and row.get("instruction"):
+                row["instruction"] = (
+                    f"{row['instruction']}  [!] Check this row: {notes[0]}"
+                )
+
+
+def _mark_repeated_rows(pattern: dict):
+    """
+    Позначає ідентичні сусідні ряди, щоб фронтенд міг згорнути їх у діапазон.
+
+    Ribblr пише "4-5 Sc around (18)" одним рядком замість двох однакових —
+    патерн стає помітно коротшим і читабельнішим. Саме згортання лишається за
+    фронтендом (там чекбокси на кожен ряд), бекенд лише проставляє розмітку:
+      repeat_group — спільний номер для групи однакових рядів
+      repeat_of    — номер першого ряду групи (None у самого першого)
+
+    Порівнюємо за кількістю петель і текстом інструкції без номера ряду.
+    """
+    def normalize(text: str) -> str:
+        text = re.sub(r"^\s*(?:row|rnd|round)\s*\d+[.:]?\s*", "", text or "",
+                      flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", text).strip().lower()
+
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        rows = [r for r in (section.get("rows") or []) if isinstance(r, dict)]
+        group = 0
+        prev_key = None
+        first_number = None
+        for row in rows:
+            key = (row.get("stitch_count"), normalize(row.get("instruction", "")))
+            if prev_key is not None and key == prev_key:
+                row["repeat_group"] = group
+                row["repeat_of"] = first_number
+            else:
+                group += 1
+                first_number = row.get("row_number")
+                row["repeat_group"] = group
+                row["repeat_of"] = None
+            prev_key = key
+
+
+def validate_pattern(pattern: dict) -> dict:
+    """
+    Перевіряє патерн арифметикою і позначає знайдене.
+
+    Помилки НЕ виправляються і патерн НЕ перегенеровується: це подвоїло б час
+    генерації, від якого ми й так потерпаємо. Замість цього користувач бачить,
+    де саме варто перерахувати. Виняток — готовий розмір: його ми рахуємо самі
+    й підставляємо, бо модель помиляється тут стабільно.
+    """
+    try:
+        issues = []
+        _check_chart_arithmetic(pattern, issues)
+        _check_text_matches_count(pattern, issues)
+        _check_assembly_covers_sections(pattern, issues)
+
+        gauge_pair = _parse_gauge(pattern.get("gauge", ""))
+        if gauge_pair:
+            computed = _compute_size(pattern, gauge_pair)
+            if computed:
+                stated = pattern.get("finished_size")
+                pattern["finished_size"] = computed
+                pattern["finished_size_stated_by_model"] = stated
+
+        _annotate_rows(pattern, issues)
+        _mark_repeated_rows(pattern)
+
+        checks = sum(len(s.get("rows") or []) for s in (pattern.get("sections") or []))
+        pattern["validation"] = {
+            "checked": True,
+            "checks_run": checks,
+            "issues_found": len(issues),
+            "issues": issues[:20],
+            "size_calculated": bool(gauge_pair),
+            "summary": (f"Checked {checks} rows automatically — no discrepancies found"
+                        if not issues else
+                        f"Checked {checks} rows automatically — {len(issues)} to review"),
+        }
+    except Exception as exc:
+        pattern["validation"] = {"checked": False, "error": str(exc)[:200]}
+    return pattern
+
+
 def sanitize_svg(svg: str):
     try:
         svg = svg.replace("\n", "").replace("\r", "").replace("\t", "").strip()
@@ -534,6 +815,16 @@ ROW NUMBERING:
 - Number rows WITHIN each section, starting from 1 in every section.
   Do NOT continue numbering across sections. Section "Body" rows 1..12,
   then section "Stem" rows 1..3 — not 13..15.
+
+INLINE NOTES:
+- Put practical notes on the ROW where they are needed, in that row's "notes"
+  field — not only at the end of the pattern. Examples: "Insert safety eyes
+  between rounds 5 and 6, 4 stitches apart", "Start stuffing now", "Change to
+  the second color", "Fasten off and leave a long tail".
+  A maker follows the pattern top to bottom; a note that arrives after the piece
+  is closed is useless.
+- Keep assembly for joining separate pieces together. Anything that happens
+  WHILE working a piece belongs in that piece's rows.
 
 ASSEMBLY RULES:
 - assembly is mandatory whenever the pattern has more than one section, and it
@@ -763,6 +1054,7 @@ def generate_pattern(
         pattern = ensure_assembly(pattern)
 
         charge_after_success(auth_header, is_retry=request_body.is_retry)
+        pattern = validate_pattern(pattern)
         return {"pattern": pattern}
 
     except json.JSONDecodeError:
@@ -792,6 +1084,7 @@ def generate_pattern(
             pattern = enrich_chart(pattern)
             pattern = ensure_assembly(pattern)
             charge_after_success(auth_header, is_retry=request_body.is_retry)
+            pattern = validate_pattern(pattern)
             return {"pattern": pattern}
         except HTTPException:
             raise
