@@ -201,14 +201,6 @@ def _plan_materials(model, idea, size_text, units):
     які тут не потрібні, а обробка їх з'їла б увесь виграш у часі. Відповідь —
     чотири поля, тобто секунди.
     """
-    # Спершу з'ясовуємо матеріали й щільність окремим коротким викликом, щоб
-    # порахувати потрібну кількість петель. Інакше модель вирішує це сама і
-    # стабільно помиляється: подає обхват як діаметр, і виріб виходить утричі
-    # меншим за замовлений.
-    sizing = _plan_materials(model, request_body.idea, request_body.size, request_body.units)
-    target = _target_stitches(request_body.size, sizing["sts_per_cm"]) if sizing else None
-    sizing_brief = _sizing_brief(sizing, target)
-
     try:
         message = _stream_message(
             model=model,
@@ -1704,6 +1696,14 @@ def generate_pattern(
     # Перевірка без запису: якщо стежок не вистачає — 402 ще до моделі.
     # Саме списання йде нижче, після того як патерн реально готовий.
     increment_generations(auth_header, is_retry=request_body.is_retry, dry_run=True)
+
+    # Спершу з'ясовуємо матеріали й щільність окремим коротким викликом, щоб
+    # порахувати потрібну кількість петель. Інакше модель вирішує це сама і
+    # стабільно помиляється: подає обхват як діаметр, і виріб виходить утричі
+    # меншим за замовлений.
+    sizing = _plan_materials(model, request_body.idea, request_body.size, request_body.units)
+    target = _target_stitches(request_body.size, sizing["sts_per_cm"]) if sizing else None
+    sizing_brief = _sizing_brief(sizing, target)
 
     try:
         message = _stream_message(
