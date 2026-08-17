@@ -1068,7 +1068,14 @@ def _count_from_instruction(text, previous):
     # Прибрати фразу приєднання: "sl st to first sc to join" — це не нові петлі,
     # а вказівка, куди приєднатись. Згадане там "sc" рахувалось як стібок і
     # давало 8 замість 6 у першому ряду з магічним кільцем.
-    body = re.sub(r"sl\s*st\b[^,.;]*\bjoin\b", " ", body)
+    body = re.sub(r"sl\s*st\b[^,.;]*\b(?:join|close|attach)\b", " ", body)
+
+    # В'язання вздовж обох боків ланцюжка ("work 11 sts along the other
+    # side") простим додаванням не рахується: частина петель описана
+    # словами, а не переліком стібків. Краще промовчати, ніж дати число,
+    # якого в ряду немає.
+    if re.search(r"other side|both sides|around the (?:foundation )?chain", body):
+        return None
 
     STITCH = r"(?:sc2tog|dc2tog|hdc2tog|fpdc|bpdc|slst|sl\s*st|hdc|sc|dc|tr|inc|dec)"
 
@@ -1079,8 +1086,12 @@ def _count_from_instruction(text, previous):
         return count                  # спад дає одну; решта — як є
 
     # 1. Повтор блоку: "*sc 3, inc* repeat 6 times" / "*sc 3, inc* x6"
+    # Модель пише повтор і зірочками, і квадратними дужками:
+    #   "*sc 3, inc* repeat 6 times"   і   "[Sc 3, dec] repeat 6 times"
+    # Розпізнавались лише зірочки, тому ряди в дужках рахувались як окремі
+    # стібки: "[sc 3, dec] repeat 4 times, sc 2" давало 6 замість 18.
     repeat = re.search(
-        r"\*(?P<block>[^*]+)\*\s*(?:rep(?:eat)?(?:\s+from\s*\*)?\s*)?"
+        r"[\*\[](?P<block>[^*\]]+)[\*\]]\s*(?:rep(?:eat)?(?:\s+from\s*\*)?\s*)?"
         r"(?:around\s*)?(?:x\s*)?(?P<times>\d+)\s*(?:times)?", body)
     if repeat:
         per_block = 0
@@ -1090,7 +1101,12 @@ def _count_from_instruction(text, previous):
             per_block += value_of(m.group(2), int(m.group(1) or m.group(3) or 1))
             found = True
         if found and per_block > 0:
-            return per_block * int(repeat.group("times"))
+            total = per_block * int(repeat.group("times"))
+            # Хвіст після повтору теж рахується: "…repeat 4 times, sc 2"
+            tail = body[repeat.end():]
+            for m in re.finditer(rf"(?:(\d+)\s*)?\b({STITCH})\b(?:\s*(\d+))?", tail):
+                total += value_of(m.group(2), int(m.group(1) or m.group(3) or 1))
+            return total
 
     # 2. Проста дія на весь ряд — рахується від попереднього
     if previous:
