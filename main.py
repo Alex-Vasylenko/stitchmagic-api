@@ -104,6 +104,162 @@ def _strip_code_fences(raw: str) -> str:
     return text.strip()
 
 
+SIZING_PROMPT = """You are a crochet materials expert. Given an item description and a
+target finished size, choose the yarn and hook, and state the gauge they produce.
+
+Answer with ONLY a JSON object, no prose, no code fences:
+{"yarn": "real brand and product name with weight",
+ "hook_size": "e.g. 5mm",
+ "sts_per_10cm": 14,
+ "rows_per_10cm": 16}
+
+Use a REAL yarn brand and product. Pick a weight that suits the item and the
+requested size: bigger items take heavier yarn. sts_per_10cm and rows_per_10cm
+must be realistic for that yarn worked in single crochet."""
+
+
+# Обхват грудей у сантиметрах за міжнародними літерними розмірами.
+# Беремо середину діапазону: XS 81-86, S 86-91, M 91-96 і так далі.
+GARMENT_BUST_CM = {
+    "xxs": 78, "xs": 83, "s": 88, "m": 93, "l": 101,
+    "xl": 111, "2xl": 121, "xxl": 121, "3xl": 131, "xxxl": 131, "4xl": 141,
+}
+
+# Припуск: наскільки виріб більший за тіло. Без нього светр просто не налізе.
+GARMENT_EASE_CM = 10
+
+
+def _garment_size(size_text):
+    """
+    Розпізнає літерний розмір одягу і повертає потрібний обхват у сантиметрах.
+
+    Селектор шле рядки виду "M (bust 91-96 cm)". Якщо в тексті є явні числа
+    обхвату — беремо їх, вони точніші за таблицю. Інакше — за літерою.
+
+    Повертає (обхват_з_припуском, підпис) або None, якщо це не одяг.
+    """
+    text = str(size_text or "").lower()
+
+    explicit = re.search(r"bust\s*(\d+)\s*[-–]\s*(\d+)\s*cm", text)
+    if explicit:
+        bust = (float(explicit.group(1)) + float(explicit.group(2))) / 2
+        letter = re.match(r"\s*(xxs|xs|s|m|l|xl|2xl|xxl|3xl|xxxl|4xl)\b", text)
+        label = letter.group(1).upper() if letter else f"{bust:.0f} cm bust"
+        return bust + GARMENT_EASE_CM, label
+
+    letter = re.match(r"\s*(xxs|xs|s|m|l|xl|2xl|xxl|3xl|xxxl|4xl)\b", text)
+    if letter:
+        key = letter.group(1)
+        if key in GARMENT_BUST_CM:
+            return GARMENT_BUST_CM[key] + GARMENT_EASE_CM, key.upper()
+    return None
+
+
+def _target_stitches(size_text, sts_per_cm):
+    """
+    Скільки петель у найширшому ряду дасть замовлений розмір.
+
+    Дві різні формули, і плутати їх — головне джерело помилок:
+
+    Іграшка в круговій в'язці: найширший ряд це обхват, тож для діаметра D
+    треба D * пі * щільність. Модель тут стабільно множила без пі і давала
+    виріб утричі менший.
+
+    Одяг: літерний розмір це вже обхват грудей, пі не потрібне — але потрібен
+    припуск, інакше річ не налізе.
+
+    Повертає (петлі, розмір_см, підпис) або None, якщо розмір не розібрано.
+    """
+    if not sts_per_cm or sts_per_cm <= 0:
+        return None
+
+    def rounded(circumference):
+        return max(int(round(circumference * sts_per_cm / 6.0)) * 6, 6)
+
+    garment = _garment_size(size_text)
+    if garment:
+        circumference, label = garment
+        return rounded(circumference), circumference, f"{label} garment (chest circumference)"
+
+    match = re.search(r"([\d.]+)\s*(cm|centimet\w*|in|inch|inches|\")",
+                      str(size_text or ""), re.IGNORECASE)
+    if not match:
+        return None
+    value = float(match.group(1))
+    if match.group(2).lower().startswith(("in", '"')):
+        value *= 2.54
+    if value <= 0 or value > 300:
+        return None
+    return rounded(value * math.pi), value, f"{value:.0f} cm across"
+
+
+def _plan_materials(model, idea, size_text, units):
+    """
+    Перший, короткий виклик: пряжа, гачок, щільність.
+
+    Свідомо без SYSTEM_PROMPT: там кілька екранів правил про діаграми і збірку,
+    які тут не потрібні, а обробка їх з'їла б увесь виграш у часі. Відповідь —
+    чотири поля, тобто секунди.
+    """
+    # Спершу з'ясовуємо матеріали й щільність окремим коротким викликом, щоб
+    # порахувати потрібну кількість петель. Інакше модель вирішує це сама і
+    # стабільно помиляється: подає обхват як діаметр, і виріб виходить утричі
+    # меншим за замовлений.
+    sizing = _plan_materials(model, request_body.idea, request_body.size, request_body.units)
+    target = _target_stitches(request_body.size, sizing["sts_per_cm"]) if sizing else None
+    sizing_brief = _sizing_brief(sizing, target)
+
+    try:
+        message = _stream_message(
+            model=model,
+            max_tokens=300,
+            system=SIZING_PROMPT,
+            messages=[{"role": "user",
+                       "content": f"Item: {idea}\nTarget finished size: {size_text}\n"
+                                  f"Units: {units}\nReturn ONLY the JSON object.{sizing_brief}"}],
+        )
+        data = json.loads(_strip_code_fences(message.content[0].text))
+        sts = float(data.get("sts_per_10cm") or 0)
+        rows = float(data.get("rows_per_10cm") or 0)
+        if sts <= 0:
+            return None
+        return {
+            "yarn": str(data.get("yarn") or "").strip(),
+            "hook_size": str(data.get("hook_size") or "").strip(),
+            "sts_per_cm": sts / 10.0,
+            "rows_per_cm": (rows or sts) / 10.0,
+            "gauge_text": f"{sts:g} sc = 10 cm, {(rows or sts):g} rows = 10 cm",
+        }
+    except Exception:
+        # Не вдалось — генеруємо як раніше. Розмір тоді перевірить валідатор.
+        return None
+
+
+def _sizing_brief(plan_data, target):
+    """Текст із готовими числами, який додається до основного запиту."""
+    if not plan_data or not target:
+        return ""
+    stitches, size_cm, label = target
+    is_garment = "garment" in label
+    where = ("widest round of the body" if is_garment
+             else "widest round of the main piece")
+    explain = (f"That is a chest circumference of {size_cm:.0f} cm including ease, "
+               f"which is what size {label.split()[0]} needs."
+               if is_garment else
+               f"At this gauge that gives a finished width of about {size_cm:.0f} cm, "
+               f"which is what the user asked for.")
+    return (
+        f"\nMATERIALS AND SIZE ARE ALREADY DECIDED — use exactly these:\n"
+        f"- Yarn: {plan_data['yarn']}\n"
+        f"- Hook: {plan_data['hook_size']}\n"
+        f"- Gauge: {plan_data['gauge_text']}\n"
+        f"- Target: {label}\n"
+        f"- The {where} MUST have {stitches} stitches. {explain} "
+        f"Build up to exactly {stitches} stitches — do not stop earlier.\n"
+        f"- Put this gauge string in the gauge field verbatim: {plan_data['gauge_text']}\n"
+    )
+
+
 def _stream_message(**kwargs):
     """
     Виклик моделі зі стрімом + замір часу.
@@ -1562,7 +1718,7 @@ def generate_pattern(
             messages=[
                 {
                     "role": "user",
-                    "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nREQUIRED FINISHED SIZE: {request_body.size} — the finished piece must actually measure this. Derive stitch counts from the gauge to reach it.\nIMPORTANT: Use {request_body.units} for ALL measurements. Gauge must be in {request_body.units}. Finished size must be in {request_body.units}. Do not use any other unit of measurement.\n\nEvery separate piece must be listed in assembly with its exact position on the main piece. Return ONLY the JSON object."
+                    "content": f"Design a crochet pattern.\nIdea: {request_body.idea}\nDifficulty: {request_body.difficulty}\nREQUIRED FINISHED SIZE: {request_body.size} — the finished piece must actually measure this. Derive stitch counts from the gauge to reach it.\nIMPORTANT: Use {request_body.units} for ALL measurements. Gauge must be in {request_body.units}. Finished size must be in {request_body.units}. Do not use any other unit of measurement.\n\nEvery separate piece must be listed in assembly with its exact position on the main piece. Return ONLY the JSON object.{sizing_brief}"
                 }
             ]
         )
