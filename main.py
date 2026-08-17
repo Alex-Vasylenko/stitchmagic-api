@@ -216,7 +216,7 @@ def _plan_materials(model, idea, size_text, units):
             system=SIZING_PROMPT,
             messages=[{"role": "user",
                        "content": f"Item: {idea}\nTarget finished size: {size_text}\n"
-                                  f"Units: {units}\nReturn ONLY the JSON object.{sizing_brief}"}],
+                                  f"Units: {units}\nAnswer with the JSON object only."}],
         )
         data = json.loads(_strip_code_fences(message.content[0].text))
         sts = float(data.get("sts_per_10cm") or 0)
