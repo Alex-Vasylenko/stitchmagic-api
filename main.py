@@ -1086,6 +1086,129 @@ def _adjudicate_counts(pattern, issues):
                 })
 
 
+def _pattern_text(pattern):
+    """Увесь текст патерна одним рядком — інструкції, нотатки, збірка."""
+    parts = []
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for row in section.get("rows") or []:
+            if isinstance(row, dict):
+                parts.append(str(row.get("instruction") or ""))
+                parts.append(str(row.get("notes") or ""))
+    for step in pattern.get("assembly") or []:
+        parts.append(str(step))
+    return " ".join(parts).lower()
+
+
+# Що згадується в інструкціях і має бути в матеріалах. Ключ — як шукаємо в
+# тексті, значення — як називаємо користувачу.
+REQUIRED_SUPPLIES = {
+    r"safety eyes?": "safety eyes",
+    r"fiberfill|polyfill|stuffing|stuff (?:the|it|firmly)": "stuffing (fiberfill)",
+    r"stitch marker": "stitch marker",
+    r"yarn needle|tapestry needle|darning needle": "yarn needle",
+    r"pipe cleaner": "pipe cleaner",
+    r"floral wire|craft wire": "wire",
+    r"embroidery floss": "embroidery floss",
+    r"felt\b": "felt",
+    r"hot glue|fabric glue": "glue",
+    r"button": "buttons",
+    r"ribbon": "ribbon",
+}
+
+
+def _check_materials(pattern, issues):
+    """
+    Звіряє матеріали, згадані в інструкціях, зі списком матеріалів.
+
+    Найпрактичніша з усіх перевірок: без очей чи наповнювача роботу не почати,
+    а дізнатись про це посеред в'язання — найгірший момент.
+    """
+    materials = pattern.get("materials")
+    listed = ""
+    if isinstance(materials, dict):
+        listed = " ".join(str(v) for v in materials.values() if v is not None).lower()
+        extras = materials.get("extras")
+        if isinstance(extras, list):
+            listed += " " + " ".join(str(e) for e in extras).lower()
+
+    text = _pattern_text(pattern)
+    missing = []
+    for probe, label in REQUIRED_SUPPLIES.items():
+        if re.search(probe, text) and not re.search(probe, listed):
+            missing.append(label)
+
+    if missing:
+        issues.append({
+            "section": None, "row": None, "kind": "materials",
+            "text": ("the instructions use supplies that are not in the materials "
+                     "list: " + ", ".join(sorted(set(missing)))),
+        })
+
+
+def _check_yarn_quantity(pattern, issues):
+    """
+    Кількість пряжі має бути вказана — інакше її неможливо купити.
+
+    Перевіряємо і числове поле, і згадку в тексті матеріалів: модель інколи
+    пише кількість словами замість заповнити поле.
+    """
+    materials = pattern.get("materials")
+    if not isinstance(materials, dict):
+        return
+    yardage = materials.get("yarn_yardage")
+    if isinstance(yardage, (int, float)) and yardage > 0:
+        return
+    described = str(materials.get("yarn_weight") or "").lower()
+    if re.search(r"\d+\s*(?:m|metre|meter|yd|yard|g|gram|oz|ball|skein)", described):
+        return
+    issues.append({
+        "section": None, "row": None, "kind": "materials",
+        "text": "no yarn quantity given — the maker cannot know how much to buy",
+    })
+
+
+def _check_spiral_vs_joined(pattern, issues):
+    """
+    Амігурумі в'яжеться спіраллю, не з'єднаними рядами.
+
+    "Ch 1 ... sl st to join" щоряду — це техніка для шапки: на іграшці лишається
+    видимий шов збоку. Плюс не сказано, куди йде перша петля наступного ряду —
+    у петлю з'єднання чи в наступну, і саме ця двозначність збиває підрахунки.
+    """
+    chart = pattern.get("chart")
+    round_sections = set()
+    if isinstance(chart, dict):
+        for section in chart.get("sections") or []:
+            if isinstance(section, dict) and str(section.get("type", "")).lower() in (
+                    "round", "cylinder"):
+                round_sections.add(str(section.get("name", "")).strip().lower())
+
+    if not round_sections:
+        return
+
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        name = section.get("name", "?")
+        if str(name).strip().lower() not in round_sections:
+            continue
+        rows = [r for r in (section.get("rows") or []) if isinstance(r, dict)]
+        if len(rows) < 4:
+            continue
+        joined = sum(1 for r in rows
+                     if re.search(r"sl\s*st[^,.;]*\bjoin\b",
+                                  str(r.get("instruction") or ""), re.IGNORECASE))
+        if joined >= len(rows) * 0.6:
+            issues.append({
+                "section": name, "row": None, "kind": "technique",
+                "text": ("this piece is worked in the round but joins every round "
+                         "with a slip stitch — that leaves a visible seam. Amigurumi "
+                         "is normally worked in a continuous spiral with a stitch marker"),
+            })
+
+
 def validate_pattern(pattern: dict) -> dict:
     """
     Перевіряє патерн арифметикою і позначає знайдене.
@@ -1100,6 +1223,9 @@ def validate_pattern(pattern: dict) -> dict:
         _check_chart_arithmetic(pattern, issues)
         _check_text_matches_count(pattern, issues)
         _check_assembly_covers_sections(pattern, issues)
+        _check_materials(pattern, issues)
+        _check_yarn_quantity(pattern, issues)
+        _check_spiral_vs_joined(pattern, issues)
         _check_duplicate_sections(pattern, issues)
         _check_chart_matches_sections(pattern, issues)
         _adjudicate_counts(pattern, issues)
@@ -1156,6 +1282,16 @@ def sanitize_svg(svg: str):
 SYSTEM_PROMPT = """You are an expert crochet pattern designer. When given a description, generate a complete, accurate crochet pattern in strict JSON format.
 
 CRITICAL RULES:
+- WORK AMIGURUMI IN A CONTINUOUS SPIRAL, not in joined rounds. Do not write
+  "ch 1 ... sl st to join" on every round of a stuffed toy piece: that is hat
+  construction and leaves a visible seam up the side. Say "place a stitch marker
+  in the first stitch and move it up each round" instead. Joined rounds are
+  correct only when the piece genuinely needs a defined edge, such as a hat brim.
+- LIST EVERY SUPPLY the instructions rely on in materials.extras: safety eyes,
+  stuffing, stitch marker, yarn needle, wire, felt, glue. If a round says
+  "insert safety eyes", the eyes must appear in the materials list with a size.
+- ALWAYS fill yarn_yardage with a realistic number. Without it the maker cannot
+  buy yarn.
 - ONE METHOD PER PIECE. Never give alternative versions of the same piece —
   no "Alternative Single-Piece Method", no "Option B", no "or you can instead".
   Choose the best approach and write only that one. Every entry in "sections"
