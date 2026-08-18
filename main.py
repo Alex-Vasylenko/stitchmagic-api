@@ -1572,6 +1572,334 @@ def _group_issues(issues):
     return grouped
 
 
+# ---------------------------------------------------------------------------
+# Craft Yarn Council standards (static tables, no network at runtime).
+# Body measurements: https://www.craftyarncouncil.com/standards/body-sizing
+# Yarn weight system: https://www.craftyarncouncil.com/standards/yarn-weight-system
+# ---------------------------------------------------------------------------
+
+# weight number -> (names, hook mm range, sc per 10 cm range, typical use)
+CYC_YARN_WEIGHTS = {
+    0: (("lace", "thread", "cobweb", "10-count", "fingering 0"), (1.6, 2.25), (32, 42),
+        "lace shawls and doilies"),
+    1: (("super fine", "superfine", "fingering", "sock", "baby 1", "4-ply"), (2.25, 3.5), (21, 32),
+        "socks, shawls, baby items"),
+    2: (("fine", "sport", "baby"), (3.5, 4.5), (16, 20), "light garments and baby wear"),
+    3: (("dk", "light worsted", "light", "double knit", "double knitting", "8-ply"), (4.5, 5.5), (12, 17),
+        "garments, amigurumi, accessories"),
+    4: (("medium", "worsted", "aran", "afghan", "10-ply"), (5.5, 6.5), (11, 14),
+        "sweaters, blankets, hats"),
+    5: (("bulky", "chunky", "craft", "rug", "12-ply"), (6.5, 9.0), (8, 11),
+        "fast blankets and outerwear"),
+    6: (("super bulky", "superbulky", "roving", "16-ply"), (9.0, 15.0), (6, 9),
+        "chunky blankets and scarves"),
+    7: (("jumbo", "roving jumbo"), (15.0, 25.0), (0, 6), "arm knitting and giant blankets"),
+}
+
+# Amigurumi is worked far tighter than the label suggests, so the usual hook
+# range does not apply - the fabric has to hide the stuffing.
+CYC_AMIGURUMI_OFFSET = 1.0
+
+# label -> (chest cm, back length cm, sleeve length cm)
+CYC_SIZES_WOMEN = {
+    "Women XS": (81, 37, 41), "Women S": (89, 38, 42), "Women M": (97, 39, 43),
+    "Women L": (107, 40, 43), "Women 1X": (117, 41, 44), "Women 2X": (127, 42, 44),
+    "Women 3X": (137, 43, 45),
+}
+CYC_SIZES_MEN = {
+    "Men S": (89, 46, 84), "Men M": (99, 48, 86), "Men L": (109, 50, 87),
+    "Men XL": (119, 52, 89), "Men 2X": (129, 53, 90), "Men 3X": (139, 55, 92),
+}
+CYC_SIZES_CHILD = {
+    "Child 2": (53, 23, 27), "Child 4": (58, 26, 30), "Child 6": (65, 29, 34),
+    "Child 8": (70, 32, 37), "Child 10": (75, 34, 40), "Child 12": (80, 37, 43),
+    "Child 14": (85, 39, 45),
+}
+
+# label -> head circumference cm
+CYC_HEADS = {
+    "Baby": 36, "Toddler": 46, "Child": 50, "Teen": 54, "Adult S": 55,
+    "Adult M": 57, "Adult L": 59,
+}
+
+# label -> foot length cm
+CYC_FEET = {
+    "Child": 18, "Women S": 22, "Women M": 24, "Women L": 25,
+    "Men M": 26, "Men L": 28,
+}
+
+_GARMENT_WORDS = (
+    ("sweater", ("sweater", "jumper", "pullover", "hoodie", "top-down")),
+    ("cardigan", ("cardigan", "shrug", "bolero")),
+    ("hat", ("hat", "beanie", "bonnet", "cap", "slouch")),
+    ("socks", ("sock", "slipper", "bootie")),
+    ("mittens", ("mitten", "glove")),
+    ("scarf", ("scarf", "cowl", "snood")),
+    ("blanket", ("blanket", "afghan", "throw", "rug")),
+    ("amigurumi", ("amigurumi", "plush", "toy", "doll", "bear", "bunny", "cat",
+                   "dog", "octopus", "dino", "pumpkin", "monster", "penguin")),
+    ("bag", ("bag", "basket", "purse", "tote", "pouch")),
+)
+
+_WEARABLES = ("sweater", "cardigan", "hat", "socks", "mittens")
+
+
+def detect_garment_type(pattern: dict) -> str:
+    """Rough item class from title, notes and section names."""
+    parts = [str(pattern.get("title") or ""), str(pattern.get("notes") or "")]
+    for section in pattern.get("sections") or []:
+        if isinstance(section, dict):
+            parts.append(str(section.get("name") or ""))
+    text = " ".join(parts).lower()
+    for kind, words in _GARMENT_WORDS:
+        if any(w in text for w in words):
+            return kind
+    return "unknown"
+
+
+def _is_child(pattern: dict) -> bool:
+    text = (str(pattern.get("title") or "") + " " + str(pattern.get("notes") or "")).lower()
+    return any(w in text for w in ("child", "kid", "baby", "toddler", "girl", "boy", "infant"))
+
+
+def _cyc_section_dims(pattern: dict, gauge_pair):
+    """
+    Per-section measurements in cm: {name: {"circ", "across", "length", "kind"}}.
+
+    Round and cylinder pieces measure as a circumference; flat pieces as a width.
+    """
+    sts_per_cm, rows_per_cm = gauge_pair
+    if not sts_per_cm or not rows_per_cm:
+        return {}
+
+    kinds = {}
+    chart = pattern.get("chart")
+    if isinstance(chart, dict):
+        for section in chart.get("sections") or []:
+            if isinstance(section, dict):
+                kinds[section.get("name")] = (section.get("type") or "").lower()
+
+    dims = {}
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        rows = _rows_of(section)
+        if not rows:
+            continue
+        name = str(section.get("name") or "?")
+        max_sts = max(r[1] for r in rows)
+        kind = kinds.get(section.get("name"), "flat")
+        width = max_sts / sts_per_cm
+        dims[name.lower()] = {
+            "name": name,
+            "kind": kind,
+            "circ": width,
+            "across": width / math.pi if kind in ("round", "cylinder", "cone") else width,
+            "length": len(rows) / rows_per_cm,
+        }
+    return dims
+
+
+def _pick_section(dims: dict, *words):
+    """Largest section whose name mentions one of the words."""
+    hits = [d for key, d in dims.items() if any(w in key for w in words)]
+    if not hits:
+        return None
+    return max(hits, key=lambda d: d["circ"])
+
+
+def _nearest_size(table: dict, value: float, index=0):
+    """Closest table entry to value; returns (label, tuple_or_number, delta)."""
+    best = None
+    for label, spec in table.items():
+        target = spec[index] if isinstance(spec, tuple) else spec
+        delta = value - target
+        if best is None or abs(delta) < abs(best[2]):
+            best = (label, spec, delta)
+    return best
+
+
+def _cyc_note(issues, text, section=None):
+    issues.append({"section": section, "row": None, "kind": "proportion", "text": text})
+
+
+def check_proportions(pattern: dict, gauge_pair, issues: list):
+    """
+    Compares the piece against CYC body measurements and records the size it
+    matches. Toys, blankets, bags and anything unrecognised are skipped: there
+    is no standard body to compare them to.
+
+    Returns the size_match dict (or None) so the caller can store it.
+    """
+    kind = detect_garment_type(pattern)
+    if kind not in _WEARABLES or not gauge_pair:
+        return None
+
+    dims = _cyc_section_dims(pattern, gauge_pair)
+    if not dims:
+        return None
+
+    match = {"type": kind, "source": "CYC"}
+
+    if kind in ("sweater", "cardigan"):
+        body = (_pick_section(dims, "body", "torso", "front", "back", "yoke")
+                or max(dims.values(), key=lambda d: d["circ"]))
+        chest = body["circ"] if body["kind"] in ("round", "cylinder", "cone") else body["circ"] * 2
+        table = CYC_SIZES_CHILD if _is_child(pattern) else CYC_SIZES_WOMEN
+        label, spec, delta = _nearest_size(table, chest, 0)
+        match.update({"size_label": label, "chest_cm": round(chest, 1)})
+        if abs(delta) > max(6.0, spec[0] * 0.08):
+            _cyc_note(issues,
+                      f"chest measures about {chest:.0f} cm from the gauge - that sits between "
+                      f"standard sizes (closest is {label}, {spec[0]} cm). Check the stitch count "
+                      f"of the body if you are making a standard size.",
+                      body["name"])
+        sleeve = _pick_section(dims, "sleeve", "arm")
+        if sleeve:
+            want = spec[2]
+            got = sleeve["length"]
+            if abs(got - want) > max(5.0, want * 0.15):
+                shorter = "shorter" if got < want else "longer"
+                _cyc_note(issues,
+                          f"the sleeve works out about {got:.0f} cm, which is {abs(got - want):.0f} cm "
+                          f"{shorter} than the usual {want} cm for {label}.",
+                          sleeve["name"])
+            match["sleeve_cm"] = round(got, 1)
+        length = body["length"]
+        if length and abs(length - spec[1]) > max(6.0, spec[1] * 0.2):
+            shorter = "shorter" if length < spec[1] else "longer"
+            _cyc_note(issues,
+                      f"the body works out about {length:.0f} cm long, {shorter} than the usual "
+                      f"{spec[1]} cm for {label}.",
+                      body["name"])
+        match["length_cm"] = round(length, 1)
+
+    elif kind == "hat":
+        hat = (_pick_section(dims, "hat", "crown", "brim", "band", "body")
+               or max(dims.values(), key=lambda d: d["circ"]))
+        circ = hat["circ"]
+        label, head, delta = _nearest_size(CYC_HEADS, circ + 3.0)
+        match.update({"size_label": label, "head_cm": round(circ, 1)})
+        # A hat has to stretch onto the head: 2-5 cm of negative ease.
+        if circ >= head:
+            _cyc_note(issues,
+                      f"the hat measures about {circ:.0f} cm around, the same as or wider than the "
+                      f"standard {label} head ({head} cm). Hats are usually worked 2-5 cm smaller so "
+                      f"they stay on.",
+                      hat["name"])
+
+    elif kind == "socks":
+        foot = _pick_section(dims, "foot", "toe", "sole") or max(dims.values(), key=lambda d: d["length"])
+        label, want, delta = _nearest_size(CYC_FEET, foot["length"])
+        match.update({"size_label": label, "foot_cm": round(foot["length"], 1)})
+        if abs(delta) > 3.0:
+            _cyc_note(issues,
+                      f"the foot works out about {foot['length']:.0f} cm, {abs(delta):.0f} cm off the "
+                      f"standard {want} cm for {label}.",
+                      foot["name"])
+
+    elif kind == "mittens":
+        hand = max(dims.values(), key=lambda d: d["circ"])
+        match.update({"size_label": "Child" if _is_child(pattern) else "Adult",
+                      "hand_cm": round(hand["circ"], 1)})
+
+    return match if match.get("size_label") else None
+
+
+def _cyc_weight_of(text: str):
+    """CYC weight number from a yarn description, or None."""
+    if not text:
+        return None
+    low = str(text).lower()
+    m = re.search(r"(?:weight|category|cyc)\s*#?\s*([0-7])\b", low)
+    if m:
+        return int(m.group(1))
+    best = None
+    for number, (names, _hook, _gauge, _use) in CYC_YARN_WEIGHTS.items():
+        for name in names:
+            if name in low and (best is None or len(name) > best[1]):
+                best = (number, len(name))
+    return best[0] if best else None
+
+
+def _cyc_hook_mm(text: str):
+    if not text:
+        return None
+    m = re.search(r"([\d.]+)\s*mm", str(text).lower())
+    if m:
+        try:
+            value = float(m.group(1))
+        except ValueError:
+            return None
+        return value if 1.0 <= value <= 30.0 else None
+    return None
+
+
+def check_yarn_fit(pattern: dict, gauge_pair, issues: list):
+    """
+    Yarn weight vs hook vs gauge vs what is being made. Every note is advisory:
+    a designer may choose a tighter or looser fabric on purpose, and we say so
+    rather than calling it an error.
+    """
+    materials = pattern.get("materials") if isinstance(pattern.get("materials"), dict) else {}
+    yarn_text = " ".join(str(v) for v in (
+        materials.get("yarn_weight"), materials.get("yarn"), pattern.get("yarn")) if v)
+    hook_text = " ".join(str(v) for v in (
+        materials.get("hook_size"), pattern.get("hook")) if v)
+
+    weight = _cyc_weight_of(yarn_text)
+    hook = _cyc_hook_mm(hook_text)
+    kind = detect_garment_type(pattern)
+
+    def note(text):
+        issues.append({"section": None, "row": None, "kind": "yarn_fit", "text": text})
+
+    if weight is None:
+        if yarn_text.strip():
+            note("the yarn weight is not stated in a standard way (lace, DK, worsted, "
+                 "bulky...), so substituting yarn will be guesswork.")
+        return None
+
+    names, (hook_min, hook_max), (gauge_min, gauge_max), typical = CYC_YARN_WEIGHTS[weight]
+    label = names[0].upper() if len(names[0]) <= 3 else names[0].title()
+
+    if hook is not None:
+        # Half a millimetre of slack: crocheters routinely go one hook either
+        # way and the CYC window is a recommendation, not a rule.
+        low, high = hook_min - 0.5, hook_max + 0.5
+        if kind == "amigurumi":
+            # Toys are worked tight on purpose - shift the whole window down.
+            low, high = hook_min - CYC_AMIGURUMI_OFFSET, hook_max - 0.5
+            if hook > high:
+                note(f"{label} (CYC weight {weight}) worked at {hook:g} mm will leave gaps that "
+                     f"show the stuffing; toys are usually made on {low:g}-{high:g} mm.")
+        elif hook > high:
+            note(f"{label} (CYC weight {weight}) is usually worked with a {hook_min:g}-{hook_max:g} mm "
+                 f"hook; this pattern uses {hook:g} mm, so the fabric will be very open.")
+        elif hook < low:
+            note(f"{label} (CYC weight {weight}) is usually worked with a {hook_min:g}-{hook_max:g} mm "
+                 f"hook; this pattern uses {hook:g} mm, so the fabric will be stiff and slow to work.")
+
+    if gauge_pair:
+        sts_per_10 = gauge_pair[0] * 10.0
+        if gauge_max and sts_per_10 > gauge_max * 1.35:
+            note(f"the gauge of {sts_per_10:.0f} sc per 10 cm is tighter than usual for {label} "
+                 f"({gauge_min}-{gauge_max} sc). Fine for toys, hard work for a garment.")
+        elif gauge_min and sts_per_10 < gauge_min * 0.7:
+            note(f"the gauge of {sts_per_10:.0f} sc per 10 cm is looser than usual for {label} "
+                 f"({gauge_min}-{gauge_max} sc) - check the hook size.")
+
+    if kind in ("sweater", "cardigan") and weight >= 6:
+        note(f"{label} yarn makes a very heavy garment; weight 3-4 is the usual choice for "
+             f"a wearable {kind}.")
+    if kind == "amigurumi" and weight >= 5:
+        note(f"{label} yarn makes a large, loose toy; weight 3-4 holds the shape better.")
+    if kind == "blanket" and weight <= 2:
+        note(f"{label} yarn on a blanket means a very long make - weight 4-6 is the usual choice.")
+
+    return {"weight": weight, "label": label, "hook_mm": hook, "typical_use": typical}
+
+
 def validate_pattern(pattern: dict) -> dict:
     """
     Перевіряє патерн арифметикою і позначає знайдене.
@@ -1613,6 +1941,14 @@ def validate_pattern(pattern: dict) -> dict:
                         f"gauge: ~{across:.1f} cm across, ~{height:.1f} cm tall")
                 _check_prose_dimensions(pattern, (across, height), issues)
 
+        gauge_pair_cyc = _parse_gauge(pattern.get("gauge", ""))
+        cyc_match = None
+        try:
+            cyc_match = check_proportions(pattern, gauge_pair_cyc, issues)
+            check_yarn_fit(pattern, gauge_pair_cyc, issues)
+        except Exception:
+            cyc_match = None
+
         _annotate_rows(pattern, issues)
         _mark_repeated_rows(pattern)
 
@@ -1624,6 +1960,7 @@ def validate_pattern(pattern: dict) -> dict:
             "issues_found": len(issues),
             "issues": issues[:20],
             "size_calculated": bool(gauge_pair),
+            "size_match": cyc_match,
             "summary": (f"Checked {checks} rows automatically — no discrepancies found"
                         if not issues else
                         f"Checked {checks} rows automatically — {len(issues)} to review"),
