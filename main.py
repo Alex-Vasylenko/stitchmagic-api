@@ -533,6 +533,154 @@ def expand_symbols(symbols: list) -> list:
     return result
 
 
+CHART_STITCH = r"(?:sc2tog|dc2tog|hdc2tog|fpdc|bpdc|sl\s*st|slst|hdc|sc|dc|tr|inc|dec|ch)"
+
+CHART_CANON = {
+    "sc2tog": "dec", "dc2tog": "dec", "hdc2tog": "dec",
+    "slst": "sl", "slst ": "sl", "sl": "sl",
+}
+
+
+def _symbols_of_block(text: str) -> list:
+    """Перелік стібків у порядку виконання: "sc 3, inc" -> [sc, sc, sc, inc]."""
+    out = []
+    for m in re.finditer(rf"(?:(\d+)\s*)?\b({CHART_STITCH})\b(?:\s*(\d+))?", text):
+        name = re.sub(r"\s+", "", m.group(2))
+        name = CHART_CANON.get(name, name)
+        if name == "ch":
+            continue  # ланцюжок — основа, а не стібок ряду
+        count = int(m.group(1) or m.group(3) or 1)
+        if count > 400:
+            return []
+        out.extend([name] * count)
+        if len(out) > 1000:
+            return []
+    return out
+
+
+def _symbols_from_instruction(text, previous):
+    """
+    Символи діаграми з тексту інструкції. None — якщо ряд підрахунку не піддається.
+
+    Ті самі межі, що й у лічильника петель: проза, відносні формулювання і
+    в'язання вздовж обох боків ланцюжка чесно повертають None.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    body = text.lower()
+    body = re.sub(r"\(\s*\d+[^)]*\)\s*$", " ", body)
+    body = re.sub(r"sl\s*st\b[^,.;]*\b(?:join|close|attach)\b", " ", body)
+
+    if re.search(r"other side|both sides|around the (?:foundation )?chain|"
+                 r"across until|until \d+\s*sts?\s*remain|to last \d*\s*sts?|"
+                 r"across first \d+|remain(?:ing)? unworked|leave last|"
+                 r"each side|for (?:back |front )?neck|fasten off center|divide for",
+                 body):
+        return None
+
+    magic_ring = bool(re.search(r"magic ring|magic circle", body))
+    symbols = None
+
+    repeat = re.search(
+        r"[\*\[](?P<block>[^*\]]+)[\*\]]\s*(?:rep(?:eat)?(?:\s+from\s*\*)?\s*)?"
+        r"(?:around\s*)?(?:x\s*)?(?P<times>\d+)\s*(?:times)?", body)
+    if repeat:
+        block = _symbols_of_block(repeat.group("block"))
+        times = int(repeat.group("times"))
+        if block and 0 < times <= 200:
+            symbols = block * times + _symbols_of_block(body[repeat.end():])
+
+    if symbols is None and previous:
+        if re.search(r"\binc\b[^.]{0,20}\b(?:in\s+)?each\b", body):
+            symbols = ["inc"] * previous
+        else:
+            shrink = re.search(r"\b(?:dec|sc2tog)\b\s*(\d+)\s*times", body)
+            plain = re.search(r"\b(sc|dc|hdc)\b[^.]{0,20}\b(?:in\s+)?each\s+st", body)
+            if shrink:
+                times = int(shrink.group(1))
+                if 0 < times * 2 <= previous:
+                    symbols = ["dec"] * times + ["sc"] * (previous - times * 2)
+            elif plain:
+                symbols = [plain.group(1)] * previous
+
+    if symbols is None:
+        listed = _symbols_of_block(body)
+        symbols = listed if listed else None
+
+    if symbols is None:
+        return None
+    if magic_ring:
+        symbols = ["mr"] + symbols
+    return symbols
+
+
+def build_chart(pattern: dict) -> dict:
+    """
+    Складає діаграму з тексту патерна.
+
+    Модель більше не пише блок chart — це половина виводу і головне джерело
+    розбіжностей між текстом і діаграмою. Тут та сама деталь описується один
+    раз, тому розійтись вони не можуть.
+    """
+    try:
+        existing = pattern.get("chart")
+        if isinstance(existing, dict) and existing.get("sections"):
+            return pattern  # модель прислала свою — не чіпаємо
+
+        chart_sections = []
+        for section in pattern.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            rounds = []
+            previous = None
+            for row in section.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                instruction = row.get("instruction") or ""
+                stated = row.get("stitch_count")
+                stated = int(stated) if isinstance(stated, (int, float)) and stated > 0 else None
+
+                symbols = _symbols_from_instruction(instruction, previous)
+                if symbols is None:
+                    # Ряд підрахунку не піддався: рівний ряд за заявленою
+                    # кількістю. Краще рівний, ніж викривлений.
+                    if not stated:
+                        previous = None
+                        continue
+                    symbols = ["sc"] * min(stated, 400)
+
+                count = stated
+                if count is None:
+                    count = sum(2 if s == "inc" else 0 if s in ("mr", "sl") else 1
+                                for s in symbols)
+                    count = count or None
+                if count is None:
+                    previous = None
+                    continue
+
+                rounds.append({
+                    "stitch_count": count,
+                    "symbols": symbols,
+                    "notes": row.get("notes") or "",
+                })
+                previous = count
+
+            if rounds:
+                chart_sections.append({
+                    "name": section.get("name") or "",
+                    "type": "cylinder",  # уточнить fix_chart_types()
+                    "color_name": section.get("color_name"),
+                    "rounds": rounds,
+                })
+
+        if chart_sections:
+            pattern["chart"] = {"sections": chart_sections}
+    except Exception:
+        pass
+    return pattern
+
+
 def fix_chart_types(pattern: dict) -> dict:
     try:
         chart = pattern.get("chart")
@@ -1532,7 +1680,7 @@ CRITICAL RULES:
   head, all limbs, ears, tail, fins, and any other details as separate sections.
   Never generate only the main body and skip other parts.
   Each separate piece that needs to be crocheted independently must have 
-  its own section in both sections and chart.sections.
+  its own section.
   Examples:
   - Whale: Body, Tail, Dorsal Fin, Pectoral Fins (x2)
   - Teddy bear: Body, Head, Arms (x2), Legs (x2), Ears (x2)
@@ -1582,36 +1730,10 @@ ASSEMBLY RULES:
   (two ears, two windows), say where each one goes.
 - Mention stuffing and closing as separate steps where relevant.
 
-CHART RULES:
-- Each round object contains ONLY these three keys: stitch_count, symbols, notes.
-  Do NOT write "round", "shape_change", "color_name", "increases" or "decreases" —
-  the server derives all of them from symbols and stitch_count. Writing them
-  wastes output and is ignored.
-- notes: any special instruction for that round (magic ring, fasten off, stuff before closing etc).
-  Leave notes as an empty string when there is nothing special.
-- symbols array: use COMPACT run-length notation. Write "<count> <stitch>" for
-  consecutive identical stitches instead of repeating them one by one. The
-  server expands this automatically, so a round of 26 single crochets is
-  ["26 sc"], not twenty-six separate entries.
-  Allowed stitch codes: sc, dc, hdc, tr, ch, sl, inc, dec, fpdc, bpdc, mr
-  CORRECT: ["mr", "6 sc"]
-  CORRECT: ["dec", "22 sc", "dec"]
-  CORRECT: ["3 sc", "inc", "3 sc", "inc"]
-  WRONG:   ["sc","sc","sc","sc","sc","sc", ...twenty more...]
-  WRONG:   ["2 dc in ring", "ch-2 sp"]   (prose, not a stitch code)
-  Keep the total stitch count implied by symbols equal to stitch_count.
-- For chart type follow this STRICT decision tree — check in this exact order:
-
-  STEP 1: Does round 1 notes contain "magic ring"?
-          YES → type = "round". STOP. Do not check anything else.
-          
-  STEP 2: Does any row instruction contain "turn"?
-          YES → type = "flat". STOP.
-          
-  STEP 3: Everything else → type = "cylinder".
-
-  CRITICAL: "magic ring" in notes ALWAYS means "round", even if the piece is called
-  "body", "head", "tail", or anything else. Never override this with "cylinder".
+CHART:
+- Do NOT output a "chart" object. The server builds the chart from the written
+  instructions, so anything you write there is discarded. Put every detail of a
+  round into its "instruction" and "notes" instead.
 
 RESPOND WITH ONLY VALID JSON — no markdown, no explanation, no code fences.
 
@@ -1649,23 +1771,6 @@ JSON structure:
       ]
     }
   ],
-  "chart": {
-    "sections": [
-      {
-        "name": "Section name",
-        "type": "round|cylinder|flat|cone|triangle|square",
-        "color_name": "Main color",
-        "shape_change": "expanding|decreasing|straight",
-        "rounds": [
-          {
-            "stitch_count": 6,
-            "symbols": ["mr", "6 sc"],
-            "notes": "magic ring start"
-          }
-        ]
-      }
-    ]
-  },
   "assembly": ["step1", "step2"]
 }"""
 
@@ -1802,6 +1907,7 @@ def generate_pattern(
 
         text = _strip_code_fences(message.content[0].text)
         pattern = json.loads(text)
+        pattern = build_chart(pattern)
         pattern = fix_chart_types(pattern)
         pattern = enrich_chart(pattern)
         pattern = ensure_assembly(pattern)
@@ -1833,6 +1939,7 @@ def generate_pattern(
                     detail="Pattern too large to generate. Try a simpler idea or a smaller size.",
                 )
             pattern = json.loads(_strip_code_fences(retry_message.content[0].text))
+            pattern = build_chart(pattern)
             pattern = fix_chart_types(pattern)
             pattern = enrich_chart(pattern)
             pattern = ensure_assembly(pattern)
