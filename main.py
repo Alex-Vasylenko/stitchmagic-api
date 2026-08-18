@@ -1077,6 +1077,19 @@ def _count_from_instruction(text, previous):
     if re.search(r"other side|both sides|around the (?:foundation )?chain", body):
         return None
 
+    # Відносні вказівки: "sc across until 2 sts remain", "work to last st",
+    # "sl st across first 4 sts". Скільки саме петель вони означають, з тексту
+    # не видно — це виводиться з попереднього ряду, а не з переліку стібків.
+    # Мова саме одягу; для амігурумі кожен ряд самодостатній.
+    if re.search(r"across until|until \d+\s*sts?\s*remain|to last \d*\s*sts?|"
+                 r"across first \d+|remain(?:ing)? unworked|leave last", body):
+        return None
+
+    # Розділення роботи на частини: кількість петель падає законно.
+    if re.search(r"each side|for (?:back |front )?neck|shoulder(?:s)? |"
+                 r"fasten off center|divide for", body):
+        return None
+
     STITCH = r"(?:sc2tog|dc2tog|hdc2tog|fpdc|bpdc|slst|sl\s*st|hdc|sc|dc|tr|inc|dec)"
 
     def value_of(name, count):
@@ -1373,6 +1386,44 @@ def _check_spiral_vs_joined(pattern, issues):
             })
 
 
+def _group_issues(issues):
+    """
+    Згортає однакові зауваження в одне.
+
+    Рукав светра дав дев'ять окремих рядків про той самий зсув діаграми на один
+    ряд. Дев'ять однакових повідомлень читаються як дев'ять різних проблем і
+    ховають справжні знахідки.
+    """
+    if len(issues) < 3:
+        return issues
+
+    buckets = {}
+    order = []
+    for issue in issues:
+        shape = re.sub(r"\d+", "#", str(issue.get("text", "")))
+        key = (issue.get("section"), issue.get("kind"), shape)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(issue)
+
+    grouped = []
+    for key in order:
+        same = buckets[key]
+        if len(same) < 3:
+            grouped.extend(same)
+            continue
+        rows = [i.get("row") for i in same if isinstance(i.get("row"), int)]
+        where = f"rows {min(rows)}-{max(rows)}" if rows else "several rows"
+        grouped.append({
+            "section": same[0].get("section"),
+            "row": None,
+            "kind": same[0].get("kind"),
+            "text": f"{same[0]['text']} (and {len(same) - 1} more like it, {where})",
+        })
+    return grouped
+
+
 def validate_pattern(pattern: dict) -> dict:
     """
     Перевіряє патерн арифметикою і позначає знайдене.
@@ -1417,6 +1468,7 @@ def validate_pattern(pattern: dict) -> dict:
         _annotate_rows(pattern, issues)
         _mark_repeated_rows(pattern)
 
+        issues = _group_issues(issues)
         checks = sum(len(s.get("rows") or []) for s in (pattern.get("sections") or []))
         pattern["validation"] = {
             "checked": True,
