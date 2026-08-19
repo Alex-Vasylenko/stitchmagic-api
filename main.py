@@ -615,6 +615,86 @@ def _symbols_from_instruction(text, previous):
     return symbols
 
 
+def _expand_row_ranges(pattern: dict) -> dict:
+    """
+    Розгортає компактні діапазони рядів у окремі ряди.
+
+    Модель пише {"row_number": 3, "row_number_end": 10, ...} одним об'єктом —
+    це прибирає близько половини виводу. Тут діапазон повертається у звичайні
+    ряди, тому решта конвеєра (build_chart, валідатор) і фронтенд працюють
+    так само, як і до цієї зміни.
+
+    Обережність навмисна: розгортаємо лише те, у чому впевнені.
+      - кінець має бути більшим за початок і не далі ніж на 200 рядів;
+      - stitch_count має бути один на весь діапазон (він і є ознакою того,
+        що ряди однакові);
+      - усе інше лишаємо як є і позначаємо, щоб валідатор побачив.
+    """
+    MAX_SPAN = 200
+    for section in pattern.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        rows = section.get("rows")
+        if not isinstance(rows, list):
+            continue
+
+        expanded = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            start = row.get("row_number")
+            end = row.pop("row_number_end", None)
+
+            if end is None:
+                expanded.append(row)
+                continue
+
+            try:
+                start_i = int(start)
+                end_i = int(end)
+            except (TypeError, ValueError):
+                expanded.append(row)
+                continue
+
+            span = end_i - start_i
+            if span <= 0 or span > MAX_SPAN:
+                # Діапазон безглуздий — беремо як один ряд, нічого не вигадуємо.
+                expanded.append(row)
+                continue
+
+            count = row.get("stitch_count")
+            if not isinstance(count, (int, float)) or count <= 0:
+                # Без сталої кількості петель це не однакові ряди.
+                # Розгортати наосліп означало б вигадати дані.
+                row["range_not_expanded"] = True
+                expanded.append(row)
+                continue
+
+            base_instruction = row.get("instruction") or ""
+            base_notes = row.get("notes") or ""
+
+            for offset in range(span + 1):
+                number = start_i + offset
+                clone = {
+                    "id": "row_%d" % number,
+                    "row_number": number,
+                    "instruction": base_instruction,
+                    "stitch_count": count,
+                }
+                if row.get("color_name"):
+                    clone["color_name"] = row["color_name"]
+                # Нотатка стосується місця, а не кожного ряду: лишаємо її
+                # на останньому ряду діапазону ("рубчик закінчено"), інакше
+                # вона повторилася б вісім разів поспіль.
+                if base_notes and offset == span:
+                    clone["notes"] = base_notes
+                expanded.append(clone)
+
+        section["rows"] = expanded
+    return pattern
+
+
 def build_chart(pattern: dict) -> dict:
     """
     Складає діаграму з тексту патерна.
@@ -2045,6 +2125,21 @@ ROW NUMBERING:
 - Number rows WITHIN each section, starting from 1 in every section.
   Do NOT continue numbering across sections. Section "Body" rows 1..12,
   then section "Stem" rows 1..3 — not 13..15.
+- COLLAPSE IDENTICAL CONSECUTIVE ROWS into ONE object using "row_number_end".
+  When several rows in a row have the SAME instruction and the SAME stitch
+  count, write them once:
+    {"row_number": 3, "row_number_end": 10,
+     "instruction": "Ch 1, turn. BLO sc in each st across.",
+     "stitch_count": 80}
+  instead of eight near-identical objects. The server expands the range back
+  into individual rows, so nothing is lost for the maker.
+  Rules for collapsing:
+    * ONLY when the instruction text and the stitch count are identical.
+    * NEVER collapse rows that increase, decrease, change colour, or differ
+      in any way — those must stay separate objects with their own counts.
+    * Omit "row_number_end" entirely for a single row.
+  This matters: a garment written row-by-row is several times longer than it
+  needs to be.
 
 INLINE NOTES:
 - Put practical notes on the ROW where they are needed, in that row's "notes"
@@ -2102,6 +2197,7 @@ JSON structure:
         {
           "id": "row_1",
           "row_number": 1,
+          "row_number_end": 4,
           "instruction": "full instruction here",
           "stitch_count": 6
         }
@@ -2244,6 +2340,7 @@ def generate_pattern(
 
         text = _strip_code_fences(message.content[0].text)
         pattern = json.loads(text)
+        pattern = _expand_row_ranges(pattern)
         pattern = build_chart(pattern)
         pattern = fix_chart_types(pattern)
         pattern = enrich_chart(pattern)
@@ -2276,6 +2373,7 @@ def generate_pattern(
                     detail="Pattern too large to generate. Try a simpler idea or a smaller size.",
                 )
             pattern = json.loads(_strip_code_fences(retry_message.content[0].text))
+            pattern = _expand_row_ranges(pattern)
             pattern = build_chart(pattern)
             pattern = fix_chart_types(pattern)
             pattern = enrich_chart(pattern)
