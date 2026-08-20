@@ -558,6 +558,199 @@ def _symbols_of_block(text: str) -> list:
     return out
 
 
+
+# Клауза, що не змінює кількість петель: службова або оздоблювальна.
+_IGNORABLE = re.compile(
+    r"^(?:turn|do not turn|ch\s*\d+|blo|flo|working in (?:blo|flo|back loops?|front loops?)"
+    r"|back loops? only|front loops? only|fasten off[\w\s]*|weave in[\w\s]*"
+    r"|leav(?:e|ing) a[\w\s]*tail[\w\s]*|place a? ?(?:stitch )?marker[\w\s]*"
+    r"|sl\s*st (?:to|in) (?:first|the first) sc(?: to join| to close)?[\w\s]*"
+    r"|join(?: with)? sl\s*st[\w\s]*|stuff[\w\s]*|repeat[\w\s]*)$")
+
+# Ряд цілком зі скорочень: "[sc2tog] across", "dec in each st around".
+# "across"/"around"/"each st" ОБОВʼЯЗКОВЕ: без нього одиночне "sc2tog" — це
+# одне скорочення на краю ряду, а не скорочення всього ряду.
+_ALL_DEC = re.compile(
+    r"^\[?\s*(?:sc2tog|dc2tog|hdc2tog|dec)\s*\]?"
+    r"(?:\s+(?:in\s+)?each\s+st)?\s+(?:across|around)$"
+    r"|^\[?\s*(?:sc2tog|dc2tog|hdc2tog|dec)\s*\]?\s+(?:in\s+)?each\s+st\b.*$")
+
+# Ряд цілком із приростів: "inc in each st around".
+_ALL_INC = re.compile(
+    r"^\[?\s*inc\s*\]?\s+(?:in\s+)?each\s+st\b.*$"
+    r"|^2\s*(?:sc|dc|hdc)\s+in\s+each\s+st\b.*$"
+    r"|^\[?\s*inc\s*\]?\s+(?:across|around)$")
+
+# "sc2tog 6 times" / "dec 6 times"
+_DEC_TIMES = re.compile(
+    r"^(?:sc2tog|dc2tog|hdc2tog|dec)\s+(\d+)\s*times?$")
+
+# Одне скорочення: "sc2tog", "dec", "dec over first 2 sts", "sc2tog over last 2 sts"
+_ONE_DEC = re.compile(
+    r"^(?:sc2tog|dc2tog|hdc2tog|dec)"
+    r"(?:\s+over\s+(?:the\s+)?(?:first|last|next)\s+2\s+sts?)?$")
+
+# Один приріст: "inc", "inc in next st", "2 sc in first st"
+_ONE_INC = re.compile(
+    r"^(?:inc(?:\s+in\s+(?:the\s+)?(?:first|last|next)\s+st)?"
+    r"|2\s*(?:sc|dc|hdc)\s+in\s+(?:the\s+)?(?:first|last|next)\s+st)$")
+
+# Фіксована кількість звичайних петель: "sc in last st", "sc in next 3 sts", "sc"
+_FIXED_PLAIN = re.compile(
+    r"^(?:blo\s+|flo\s+)?(sc|dc|hdc|tr)"
+    r"(?:\s+in\s+(?:the\s+)?(?:first|last|next)\s+(\d+)?\s*sts?|\s+in\s+(?:the\s+)?"
+    r"(?:first|last|next)\s+st)?$")
+
+# Решта ряду: "sc in each st across", "sc across to last 2 sts", "sc to end"
+# Решта ряду. "to last N sts" теж сюди: ті N петель заберуть сусідні клаузи,
+# а скільки саме лишилось — рахує баланс, не текст.
+_REMAINDER = re.compile(
+    r"^(?:blo\s+|flo\s+)?(sc|dc|hdc|tr)\s+"
+    r"(?:in\s+each\s+st\b|in\s+each\b|in\s+ea\b|across\b|around\b"
+    r"|to\s+end\b|to\s+(?:the\s+)?last\s+(?:\d+\s*)?sts?\b)"
+    r"[\w\s]*$")
+
+
+# Чи є в клаузі хоч одне позначення петлі.
+_HAS_STITCH = re.compile(
+    r"\b(?:sc2tog|dc2tog|hdc2tog|fpdc|bpdc|sl\s*st|slst|hdc|sc|dc|tr|inc|dec|ch)\b")
+
+
+def _row_from_clauses(text, previous):
+    """
+    Рахує ряд, розбиваючи його на клаузи й зводячи баланс петель.
+
+    Кожна клауза або споживає відому кількість петель попереднього ряду
+    ("sc2tog" — дві, "inc" — одну), або забирає весь залишок
+    ("sc in each st across"). Залишок = previous мінус усе фіксоване, тому
+    порядок клауз значення не має: "sc2tog, sc across to last 2 sts, sc2tog"
+    і "sc across to last 2 sts, sc2tog" рахуються однаково правильно.
+
+    Це замінює попередній підхід, який шукав у рядку "sc in each st" і
+    приймав його за ВЕСЬ ряд, ігноруючи скорочення поруч. Через це ряд
+    "Sc2tog, sc in each st across" при 23 петлях давав 23 замість 22, і
+    валідатор скаржився на правильні патерни.
+
+    Повертає None, щойно трапляється незрозуміла клауза — краще пропустити
+    ряд, ніж порахувати його навмання.
+    """
+    if not isinstance(previous, int) or previous <= 0:
+        return None
+    if not isinstance(text, str):
+        return None
+
+    body = text.lower().strip()
+    body = re.sub(r"\(\s*\d+[^)]*\)", " ", body)          # лічильник у дужках
+    # Номер ряду попереду ("Rnd 7.", "Row 12:", "R3 ") — не клауза.
+    # Без цього кожен амігурумі-ряд відпадав на першій же клаузі.
+    body = re.sub(r"^\s*(?:row|rnd|round|r)\s*\d+\s*[.:)\-]?\s*", "", body)
+    body = re.sub(r"^\s*(?:ch\s*\d+\s*[,.]?\s*)?(?:turn\s*[,.]?\s*)?", "", body)
+    body = body.strip(" .;")
+    if not body:
+        return None
+
+    clauses = [c.strip(" .;") for c in re.split(r"[,.;]", body)]
+    clauses = [c for c in clauses if c]
+    if not clauses:
+        return None
+
+    fixed = []          # (споживає, символи)
+    remainder_at = None
+    remainder_stitch = "sc"
+
+    for index, clause in enumerate(clauses):
+        if _IGNORABLE.match(clause):
+            continue
+
+        # Клауза без жодного позначення петлі не змінює їх кількість: це
+        # побутова приписка — "change to color B", "start stuffing now",
+        # "insert safety eyes between rounds 5 and 6". Перелічувати такі
+        # фрази марно, їх безліч; ознака в тому, що в'язати там нічого.
+        if not _HAS_STITCH.search(clause):
+            continue
+
+        if _ALL_DEC.match(clause):
+            # Скорочення на весь ряд може бути тільки самé.
+            if fixed or remainder_at is not None or len(clauses) - index > 1:
+                if any(not _IGNORABLE.match(c) for c in clauses[index + 1:]):
+                    return None
+            if previous % 2:
+                # Непарна кількість: чи довʼязується остання петля окремо, чи
+                # лишається неробленою — з тексту не видно. Не вгадуємо.
+                return None
+            return ["dec"] * (previous // 2)
+
+        if _ALL_INC.match(clause):
+            if fixed or remainder_at is not None:
+                return None
+            if any(not _IGNORABLE.match(c) for c in clauses[index + 1:]):
+                return None
+            return ["inc"] * previous
+
+        times = _DEC_TIMES.match(clause)
+        if times:
+            number = times.group(1)
+            if not number:
+                return None
+            number = int(number)
+            if number * 2 > previous:
+                return None
+            fixed.append((number * 2, ["dec"] * number))
+            continue
+
+        if _ONE_DEC.match(clause):
+            fixed.append((2, ["dec"]))
+            continue
+
+        if _ONE_INC.match(clause):
+            fixed.append((1, ["inc"]))
+            continue
+
+        rest = _REMAINDER.match(clause)
+        if rest:
+            if remainder_at is not None:
+                return None          # два "решта ряду" — розбору не піддається
+            remainder_at = len(fixed)
+            remainder_stitch = rest.group(1)
+            fixed.append(None)       # місце для залишку
+            continue
+
+        plain = _FIXED_PLAIN.match(clause)
+        if plain:
+            number = int(plain.group(2)) if plain.group(2) else 1
+            if number <= 0 or number > previous:
+                return None
+            fixed.append((number, [plain.group(1)] * number))
+            continue
+
+        return None                  # незрозуміла клауза
+
+    used = sum(item[0] for item in fixed if item is not None)
+    if used > previous:
+        return None
+
+    if remainder_at is None:
+        # Ряд без "решти": усі петлі мають бути розписані поіменно.
+        if used != previous:
+            return None
+        symbols = []
+        for item in fixed:
+            symbols.extend(item[1])
+        return symbols or None
+
+    left = previous - used
+    if left < 0:
+        return None
+
+    symbols = []
+    for item in fixed:
+        if item is None:
+            symbols.extend([remainder_stitch] * left)
+        else:
+            symbols.extend(item[1])
+    return symbols or None
+
+
 def _symbols_from_instruction(text, previous):
     """
     Символи діаграми з тексту інструкції. None — якщо ряд підрахунку не піддається.
@@ -572,10 +765,20 @@ def _symbols_from_instruction(text, previous):
     body = re.sub(r"\(\s*\d+[^)]*\)\s*$", " ", body)
     body = re.sub(r"sl\s*st\b[^,.;]*\b(?:join|close|attach)\b", " ", body)
 
+    # "to last N sts" звідси прибрано свідомо: _row_from_clauses() рахує такі
+    # ряди правильно через баланс петель. Натомість додані формулювання, на
+    # яких парсер раніше вигадував число: проза про сантиметри, набір петель
+    # по краю і поділ полотна.
     if re.search(r"other side|both sides|around the (?:foundation )?chain|"
-                 r"across until|until \d+\s*sts?\s*remain|to last \d*\s*sts?|"
-                 r"across first \d+|remain(?:ing)? unworked|leave last|"
-                 r"each side|for (?:back |front )?neck|fasten off center|divide for",
+                 r"across until|until \d+\s*sts?\s*remain|"
+                 r"across first \d+|remain(?:ing|der)?\s+(?:sts?\s+)?unworked|"
+                 r"leave last|leaving remaining|each side|"
+                 r"for (?:back |front )?neck|fasten off center|divide for|"
+                 r"until (?:the )?(?:piece|it) measures|^\s*continue\b|"
+                 r"evenly (?:around|across)|pick up|approximately \d+\s*sc|"
+                 r"\bskip\b|rejoin|reattach|work even\b|"
+                 r"(?:in|across) first \d+\s*sts|left front|right front|"
+                 r"both fronts|left shoulder|right shoulder|working on",
                  body):
         return None
 
@@ -592,17 +795,11 @@ def _symbols_from_instruction(text, previous):
             symbols = block * times + _symbols_of_block(body[repeat.end():])
 
     if symbols is None and previous:
-        if re.search(r"\binc\b[^.]{0,20}\b(?:in\s+)?each\b", body):
-            symbols = ["inc"] * previous
-        else:
-            shrink = re.search(r"\b(?:dec|sc2tog)\b\s*(\d+)\s*times", body)
-            plain = re.search(r"\b(sc|dc|hdc)\b[^.]{0,20}\b(?:in\s+)?each\s+st", body)
-            if shrink:
-                times = int(shrink.group(1))
-                if 0 < times * 2 <= previous:
-                    symbols = ["dec"] * times + ["sc"] * (previous - times * 2)
-            elif plain:
-                symbols = [plain.group(1)] * previous
+        # Розбір по клаузах із балансом петель. Попередній варіант шукав у
+        # рядку "sc in each st" і приймав його за ВЕСЬ ряд, ігноруючи
+        # скорочення поруч: "Sc2tog, sc in each st across" при 23 петлях
+        # давав 23 замість 22, і валідатор скаржився на правильні патерни.
+        symbols = _row_from_clauses(text, previous)
 
     if symbols is None:
         listed = _symbols_of_block(body)
@@ -610,6 +807,17 @@ def _symbols_from_instruction(text, previous):
 
     if symbols is None:
         return None
+
+    # Ряд мусить спожити РІВНО стільки петель, скільки було в попередньому.
+    # Це найдешевша страховка від вигаданих чисел: розбір, що з 23 петель
+    # робить один символ, тут відсіюється незалежно від того, яка гілка його
+    # породила. Ряди без попереднього ряду (перший, кільце амігурумі)
+    # перевіряти нема з чим — вони проходять як є.
+    if previous:
+        consumed = sum(2 if s == "dec" else 0 if s == "mr" else 1 for s in symbols)
+        if consumed != previous:
+            return None
+
     if magic_ring:
         symbols = ["mr"] + symbols
     return symbols
@@ -1309,8 +1517,14 @@ def _count_from_instruction(text, previous):
     # "sl st across first 4 sts". Скільки саме петель вони означають, з тексту
     # не видно — це виводиться з попереднього ряду, а не з переліку стібків.
     # Мова саме одягу; для амігурумі кожен ряд самодостатній.
-    if re.search(r"across until|until \d+\s*sts?\s*remain|to last \d*\s*sts?|"
-                 r"across first \d+|remain(?:ing)? unworked|leave last", body):
+    if re.search(r"across until|until \d+\s*sts?\s*remain|"
+                 r"across first \d+|remain(?:ing|der)?\s+(?:sts?\s+)?unworked|"
+                 r"leave last|leaving remaining|"
+                 r"until (?:the )?(?:piece|it) measures|^\s*continue\b|"
+                 r"evenly (?:around|across)|pick up|approximately \d+\s*sc|"
+                 r"\bskip\b|rejoin|reattach|work even\b|"
+                 r"(?:in|across) first \d+\s*sts|left front|right front|"
+                 r"both fronts|working on", body):
         return None
 
     # Розділення роботи на частини: кількість петель падає законно.
@@ -1349,15 +1563,15 @@ def _count_from_instruction(text, previous):
                 total += value_of(m.group(2), int(m.group(1) or m.group(3) or 1))
             return total
 
-    # 2. Проста дія на весь ряд — рахується від попереднього
+    # 2. Розбір по клаузах — те саме джерело істини, що й для діаграми.
+    # Попередній варіант шукав "sc in each st" і повертав previous, не
+    # помічаючи скорочень поруч: "Sc2tog, sc in each st across" при 23 петлях
+    # давав 23 замість 22, і валідатор писав зауваження на правильний ряд.
     if previous:
-        if re.search(r"\binc\b[^.]{0,20}\b(?:in\s+)?each\b", body):
-            return previous * 2
-        shrink = re.search(r"\b(?:dec|sc2tog)\b\s*(\d+)\s*times", body)
-        if shrink:
-            return previous - int(shrink.group(1))
-        if re.search(r"\b(?:sc|dc|hdc)\b[^.]{0,20}\b(?:in\s+)?each\s+st", body):
-            return previous
+        symbols = _row_from_clauses(text, previous)
+        if symbols:
+            return sum(2 if s == "inc" else 0 if s in ("mr", "sl") else 1
+                       for s in symbols)
 
     # 3. Перелік стібків підряд
     listed = re.findall(rf"(?:(\d+)\s*)?\b({STITCH})\b(?:\s*(\d+))?", body)
