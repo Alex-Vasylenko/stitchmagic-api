@@ -2126,20 +2126,33 @@ ROW NUMBERING:
   Do NOT continue numbering across sections. Section "Body" rows 1..12,
   then section "Stem" rows 1..3 — not 13..15.
 - COLLAPSE IDENTICAL CONSECUTIVE ROWS into ONE object using "row_number_end".
-  When several rows in a row have the SAME instruction and the SAME stitch
-  count, write them once:
+  When consecutive rows have the SAME instruction and the SAME stitch count,
+  write them once:
     {"row_number": 3, "row_number_end": 10,
-     "instruction": "Ch 1, turn. BLO sc in each st across.",
+     "instruction": "Ch 1, turn. BLO sc in each st across. (80 sc)",
      "stitch_count": 80}
-  instead of eight near-identical objects. The server expands the range back
-  into individual rows, so nothing is lost for the maker.
+  The server expands the range back into individual rows, so the maker still
+  sees rows 3, 4, 5 ... 10 exactly as before.
   Rules for collapsing:
+    * The instruction text STILL ENDS WITH THE STITCH COUNT IN PARENTHESES,
+      exactly like a single row. Collapsing changes nothing about how a row
+      is written.
     * ONLY when the instruction text and the stitch count are identical.
-    * NEVER collapse rows that increase, decrease, change colour, or differ
-      in any way — those must stay separate objects with their own counts.
+    * NEVER collapse a row that shapes the piece. Armhole bind-offs, sleeve
+      cap decreases, shoulder slopes, neckline splits, increases, decreases
+      and colour changes are each their own object with their own count.
     * Omit "row_number_end" entirely for a single row.
-  This matters: a garment written row-by-row is several times longer than it
-  needs to be.
+
+- COLLAPSING IS A WRITING SHORTHAND, NOT A DESIGN INSTRUCTION. It changes how
+  the pattern is written down, never what the finished garment is. Do NOT
+  simplify the construction to make more rows collapsible.
+    * A sweater still needs armholes, sleeve caps, shoulder shaping and a
+      proper neckline. A back panel that is 90 identical rows is a rectangle,
+      not a sweater, and is wrong however compactly it is written.
+    * Write the shaping the garment actually requires first; collapse only
+      the plain stretches that are left over.
+    * A pattern with more separate row objects is not worse. Rows that differ
+      MUST stay separate.
 
 INLINE NOTES:
 - Put practical notes on the ROW where they are needed, in that row's "notes"
