@@ -947,10 +947,18 @@ def build_chart(pattern: dict) -> dict:
                     previous = None
                     continue
 
+                # Номер ряду, з якого зроблено цей раунд. round лишається
+                # позиційним (його чекає рендер); звірятись за позицією не
+                # можна — щойно номери рядів не 1..N, вона вказує на чужий ряд.
+                source_row = row.get("row_number")
+                if not isinstance(source_row, int):
+                    source_row = None
+
                 rounds.append({
                     "stitch_count": count,
                     "symbols": symbols,
                     "notes": row.get("notes") or "",
+                    "source_row": source_row,
                 })
                 previous = count
 
@@ -963,7 +971,10 @@ def build_chart(pattern: dict) -> dict:
                 })
 
         if chart_sections:
-            pattern["chart"] = {"sections": chart_sections}
+            # Позначка, що діаграму зібрано з тексту цього ж патерна. Валідатор
+            # на неї спирається: звіряти таку діаграму з текстом означало б
+            # звіряти текст сам із собою.
+            pattern["chart"] = {"sections": chart_sections, "built_by_server": True}
     except Exception:
         pass
     return pattern
@@ -1382,46 +1393,100 @@ def _check_chart_matches_sections(pattern: dict, issues: list):
     if not isinstance(chart, dict):
         return
 
+    # Діаграму, зібрану сервером, звіряти з текстом нема сенсу: build_chart()
+    # робить її з цих самих рядів. Розбіжність між ними означала б помилку в
+    # нашому коді, а не в патерні, і показувати її користувачеві марно.
+    server_built = bool(chart.get("built_by_server"))
+
     text_rows = {}
+    text_numbers = {}
     for section in pattern.get("sections") or []:
         if isinstance(section, dict) and section.get("name"):
             key = str(section["name"]).strip().lower()
-            text_rows[key] = {n: c for n, c, _ in _rows_of(section) if n is not None}
+            listed = _rows_of(section)
+            text_numbers[key] = [n for n, _c, _t in listed if n is not None]
+            text_rows[key] = {n: c for n, c, _ in listed if n is not None}
 
     for section in chart.get("sections") or []:
         if not isinstance(section, dict):
             continue
         name = section.get("name", "?")
-        rows = text_rows.get(str(name).strip().lower())
+        key = str(name).strip().lower()
+        rows = text_rows.get(key)
         if not rows:
             continue
+        numbers = text_numbers.get(key) or []
+        # Номер, ужитий двічі, не адресує один ряд однозначно. Порівнювати за
+        # ним не можна: у светрі модель перенумеровує друге плече з 51, і
+        # {row_number: count} схлопує шість рядів у три.
+        ambiguous = len(numbers) != len(set(numbers))
 
         rounds = [r for r in (section.get("rounds") or []) if isinstance(r, dict)]
 
-        for rnd in rounds:
-            number = rnd.get("round")
-            count = rnd.get("stitch_count")
-            if number is None or not isinstance(count, (int, float)):
-                continue
-            in_text = rows.get(number)
-            if in_text is None:
-                continue
-            if abs(float(count) - in_text) > 0.01:
-                issues.append({
-                    "section": name,
-                    "row": number,
-                    "kind": "count",
-                    "text": (f"the written instructions say {in_text:g} stitches "
-                             f"but the chart says {float(count):g}"),
-                })
+        if not ambiguous:
+            for rnd in rounds:
+                # source_row — номер ряду-джерела. round тут не годиться: його
+                # проставляє enrich_chart() позицією в списку.
+                number = rnd.get("source_row")
+                if number is None:
+                    number = rnd.get("round")
+                count = rnd.get("stitch_count")
+                if number is None or not isinstance(count, (int, float)):
+                    continue
+                in_text = rows.get(number)
+                if in_text is None:
+                    continue
+                if abs(float(count) - in_text) > 0.01:
+                    issues.append({
+                        "section": name,
+                        "row": number,
+                        "kind": "count",
+                        "text": (f"the written instructions say {in_text:g} stitches "
+                                 f"but the chart says {float(count):g}"),
+                    })
 
-        if rounds and rows and len(rounds) != len(rows):
+        if ambiguous:
+            repeated = sorted({n for n in numbers if numbers.count(n) > 1})
+            shown = ", ".join(str(n) for n in repeated[:8])
+            if len(repeated) > 8:
+                shown += ", ..."
             issues.append({
                 "section": name,
-                "row": None,
+                "row": repeated[0] if repeated else None,
                 "kind": "structure",
-                "text": (f"the written instructions have {len(rows)} rows but the "
-                         f"chart has {len(rounds)} — one of them is missing a row"),
+                "text": (f"row numbers {shown} are used more than once in this "
+                         f"section — the numbering restarts partway through "
+                         f"instead of continuing"),
+            })
+            continue
+
+        if server_built:
+            continue
+
+        # Діаграма від моделі: порівнюємо множини номерів, а не довжини, і
+        # називаємо конкретні ряди. Різниця довжин не казала, ЯКИЙ ряд шукати.
+        chart_numbers = []
+        for rnd in rounds:
+            number = rnd.get("source_row")
+            if number is None:
+                number = rnd.get("round")
+            if number is not None:
+                chart_numbers.append(number)
+        only_text = [n for n in numbers if n not in set(chart_numbers)]
+        only_chart = [n for n in chart_numbers if n not in set(numbers)]
+        if only_text or only_chart:
+            missing = only_text or only_chart
+            where = "chart" if only_text else "written instructions"
+            shown = ", ".join(str(n) for n in missing[:8])
+            if len(missing) > 8:
+                shown += ", ..."
+            issues.append({
+                "section": name,
+                "row": missing[0],
+                "kind": "structure",
+                "text": (f"row {shown} is missing from the {where}"
+                         if len(missing) == 1 else
+                         f"rows {shown} are missing from the {where}"),
             })
 
 
@@ -1654,7 +1719,12 @@ def _adjudicate_counts(pattern, issues):
     Якщо підрахунок не збігається з жодним — теж повідомляє: три різні числа це
     саме те, що людині треба знати, щоб перерахувати ряд самій.
     """
-    chart_counts = {}
+    # Число з діаграми береться за source_row — номером ряду-джерела. Раніше
+    # ключем був round, який enrich_chart() проставляє ПОЗИЦІЄЮ в списку.
+    # Досить одного ряду, що не піддався підрахунку і був пропущений збирачем,
+    # щоб усі наступні позиції зсунулись, і рядові приписувалась кількість
+    # петель сусіда — з формулюванням "the other source is wrong".
+    seen = {}
     chart = pattern.get("chart")
     if isinstance(chart, dict):
         for section in chart.get("sections") or []:
@@ -1663,7 +1733,14 @@ def _adjudicate_counts(pattern, issues):
             key = str(section.get("name", "")).strip().lower()
             for rnd in section.get("rounds") or []:
                 if isinstance(rnd, dict) and isinstance(rnd.get("stitch_count"), (int, float)):
-                    chart_counts[(key, rnd.get("round"))] = float(rnd["stitch_count"])
+                    number = rnd.get("source_row")
+                    if number is None:
+                        number = rnd.get("round")
+                    seen.setdefault((key, number), set()).add(float(rnd["stitch_count"]))
+
+    # Номер, під яким у діаграмі стоять різні числа, не адресує один ряд.
+    # Мовчимо про такий ряд замість того, щоб призначити йому чуже число.
+    chart_counts = {k: v.pop() for k, v in seen.items() if len(v) == 1}
 
     for section in pattern.get("sections") or []:
         if not isinstance(section, dict):
