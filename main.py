@@ -1510,7 +1510,7 @@ def _count_from_instruction(text, previous):
     # side") простим додаванням не рахується: частина петель описана
     # словами, а не переліком стібків. Краще промовчати, ніж дати число,
     # якого в ряду немає.
-    if re.search(r"other side|both sides|around the (?:foundation )?chain", body):
+    if re.search(r"other side|opposite side|both sides|around the (?:foundation )?chain", body):
         return None
 
     # Відносні вказівки: "sc across until 2 sts remain", "work to last st",
@@ -1528,7 +1528,7 @@ def _count_from_instruction(text, previous):
         return None
 
     # Розділення роботи на частини: кількість петель падає законно.
-    if re.search(r"each side|for (?:back |front )?neck|shoulder(?:s)? |"
+    if re.search(r"each side|for (?:back |front )?neck|\bshoulders?\b|"
                  r"fasten off center|divide for", body):
         return None
 
@@ -1573,7 +1573,14 @@ def _count_from_instruction(text, previous):
             return sum(2 if s == "inc" else 0 if s in ("mr", "sl") else 1
                        for s in symbols)
 
-    # 3. Перелік стібків підряд
+    # 3. Перелік стібків підряд.
+    # Тільки коли КОЖНА петля названа поіменно. Якщо в ряду є "in each st",
+    # "across" чи "to last 2 sts", частина петель описана словами, і сума
+    # токенів безглузда: "sc in first st, inc, sc in each st to last 2 sts,
+    # inc, sc in last st" дає 1+2+1+2+1=7 замість 44.
+    if re.search(r"\bin each\b|\bacross\b|\baround\b|\bto end\b|"
+                 r"\bto (?:the )?last\b", body):
+        return None
     listed = re.findall(rf"(?:(\d+)\s*)?\b({STITCH})\b(?:\s*(\d+))?", body)
     if len(listed) >= 3:
         total = sum(value_of(name, int(a or b or 1)) for a, name, b in listed)
