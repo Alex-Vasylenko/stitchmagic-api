@@ -1255,6 +1255,15 @@ def _check_text_matches_count(pattern: dict, issues: list):
                 })
 
 
+# Деталі, які не визначають розмір виробу. Вусик гарбуза і горловина светра
+# не кажуть нічого про те, яка річ вийде, але легко перемагають корпус: вони
+# довгі. Розмір рахуємо без них.
+_SIZE_SKIP_NAMES = re.compile(
+    r"tendril|vine|cord|string|strap|tie\b|drawstring|edging|trim\b|border"
+    r"|brim|band\b|cuff|collar|neckband|placket|button|loop\b|handle"
+    r"|leaf|leaves|stem|divider|ridge|keychain|tag\b")
+
+
 def _compute_size(pattern: dict, gauge_pair):
     """
     Рахує готовий розмір зі щільності. Значення моделі не перевіряємо, а
@@ -1280,6 +1289,8 @@ def _compute_size(pattern: dict, gauge_pair):
         if not rows:
             continue
         name = section.get("name", "?")
+        if _SIZE_SKIP_NAMES.search(_core_name(name)):
+            continue
         max_sts = max(r[1] for r in rows)
         kind = chart_types.get(name, "flat")
         if kind in ("round", "cylinder", "cone"):
@@ -1287,16 +1298,30 @@ def _compute_size(pattern: dict, gauge_pair):
         else:
             across = max_sts / sts_per_cm
         height = len(rows) / rows_per_cm
-        largest = max(across, height)
-        if best is None or largest > best[0]:
-            best = (largest, name, across, height, kind)
+        # За площею, а не за більшим із вимірів. Інакше довга тонка смужка
+        # обходить корпус просто тому, що вона довга: вусик гарбуза (16.1 см
+        # на пів ряда) перемагав сам гарбуз (14.9 см упоперек).
+        area = across * height
+        if best is None or area > best[0]:
+            best = (area, name, across, height, kind)
 
     if not best:
         return None
     _, name, across, height, kind = best
+
+    # Переможець усе одно смужка — значить, корпус ми не знайшли. Краще не
+    # показати розмір, ніж показати "заввишки 0.5 см". Мовчання коштує
+    # довіри в рази менше за вигадане число.
+    if across <= 0 or height <= 0:
+        return None
+    if max(across, height) / min(across, height) > 8:
+        return None
+
     shape = "diameter" if kind in ("round", "cylinder", "cone") else "wide"
+    # Без "(largest piece: ...)": назва деталі в шапці документа — це витік
+    # нашого алгоритму, і саме він робить правильну відповідь схожою на баг.
     return (f"~{across:.1f} cm {shape}, ~{height:.1f} cm tall "
-            f"(largest piece: {name}; calculated from gauge)",
+            f"(calculated from gauge)",
             across, height)
 
 
@@ -1572,6 +1597,36 @@ def _check_prose_dimensions(pattern: dict, computed, issues: list):
     if max_cm <= 0:
         return
 
+    # Розміри кожної деталі окремо. "3 cm tall" про ніжку — не помилка, навіть
+    # якщо корпус має 8 см; помилка — це число, яке не описує жодної деталі.
+    plausible = [float(c) for c in computed if c and c > 0]
+    try:
+        gauge_pair = _parse_gauge(pattern.get("gauge", ""))
+        if gauge_pair:
+            sts_per_cm, rows_per_cm = gauge_pair
+            chart_kinds = {}
+            chart = pattern.get("chart")
+            if isinstance(chart, dict):
+                for chart_section in chart.get("sections") or []:
+                    if isinstance(chart_section, dict):
+                        chart_kinds[chart_section.get("name")] = (
+                            chart_section.get("type") or "").lower()
+            for part in pattern.get("sections") or []:
+                if not isinstance(part, dict):
+                    continue
+                part_rows = _rows_of(part)
+                if not part_rows:
+                    continue
+                part_sts = max(r[1] for r in part_rows)
+                if chart_kinds.get(part.get("name")) in ("round", "cylinder", "cone"):
+                    plausible.append((part_sts / sts_per_cm) / math.pi)
+                else:
+                    plausible.append(part_sts / sts_per_cm)
+                plausible.append(len(part_rows) / rows_per_cm)
+    except Exception:
+        pass
+    plausible = [c for c in plausible if c > 0]
+
     dimension_re = re.compile(
         r"([\d.]+)\s*(cm|centimet\w*|in|inch|inches|\")\s*"
         r"(tall|high|wide|across|in\s+diameter|in\s+width|in\s+height)",
@@ -1586,6 +1641,8 @@ def _check_prose_dimensions(pattern: dict, computed, issues: list):
                 value *= 2.54
             # Цікавлять лише грубі розбіжності: у прозі повно легітимних
             # довжин, а обчислення теж має похибку через щільність.
+            if any(c * 0.6 <= value <= c * 1.4 for c in plausible):
+                continue
             if value > max_cm * 1.4 or value < max_cm * 0.6:
                 issues.append({
                     "section": where,
@@ -2378,16 +2435,17 @@ def validate_pattern(pattern: dict) -> dict:
                 stated = pattern.get("finished_size")
                 pattern["finished_size"] = text
                 pattern["finished_size_stated_by_model"] = stated
-                # Замінити поле недостатньо: модель дублює розмір прозою
-                # в кроках збірки, і читають саме її.
-                # Розмір ВИПРАВЛЯЄМО, а не лише позначаємо: тут є одна
-                # правильна відповідь, обчислена зі щільності. Модель стабільно
-                # подає обхват як діаметр — на гарбузі це давало 20 см замість 6.7.
-                fixed = _fix_prose_dimensions(pattern, (across, height))
-                if fixed:
-                    pattern.setdefault("validation_fixes", []).append(
-                        f"corrected {fixed} size claim(s) in the text to match the "
-                        f"gauge: ~{across:.1f} cm across, ~{height:.1f} cm tall")
+                # _fix_prose_dimensions() свідомо БІЛЬШЕ НЕ ВИКЛИКАЄТЬСЯ.
+                #
+                # Вона брала цю одну пару чисел і переписувала нею кожне
+                # розмірне число в патерні. Підтверджено двічі: шнурок для
+                # вишивки скоротився з 40 см до 14.9 (діаметра гарбуза), а
+                # ніжка гарбуза — з 3 см до 0.5 (пів ряда декоративного
+                # вусика, який перемагав як "найбільша деталь").
+                #
+                # Помилка валідатора, який лише позначає, лишається помітною.
+                # Помилка валідатора, який править, потрапляє просто в патерн,
+                # і користувач не відрізнить її від задуму. Тому позначаємо.
                 _check_prose_dimensions(pattern, (across, height), issues)
 
         gauge_pair_cyc = _parse_gauge(pattern.get("gauge", ""))
