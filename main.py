@@ -1007,6 +1007,11 @@ _CHART_ROUND = re.compile(
 
 _CHART_MAGIC_RING = re.compile(r"magic ring|magic circle")
 
+# Слабка ознака: перший ряд починається набором ланцюжка. Сама по собі
+# нічого не доводить — "ch 2" стоїть у кожному ряду зʼєднаної шапки, —
+# тому працює лише тоді, коли жодної ознаки роботи по колу немає.
+_CHART_CHAIN_START = re.compile(r"^[^.;]{0,40}?\bch\s*\d+\b")
+
 # Позначення стібка. Секція без жодного з них нічого не вʼяже — це вишивка,
 # шнурок чи вказівка зі збірки, і чарту в неї бути не повинно.
 _CHART_HAS_STITCH = re.compile(
@@ -1057,6 +1062,7 @@ def fix_chart_types(pattern: dict) -> dict:
 
             # Увесь текст секції одним рядком: інструкції рядів плюс нотатки
             # раундів. Доказ може стояти в будь-якому ряду, не лише в першому.
+            pattern_section_rows = section_instructions
             blob = " ".join(section_instructions.get(name, []))
             for r in rounds:
                 if isinstance(r, dict):
@@ -1078,6 +1084,17 @@ def fix_chart_types(pattern: dict) -> dict:
             if "turn" in blob:
                 section["type"] = "flat"
                 continue
+
+            # Ланцюжок на початку першого ряду. Сюди доходять лише секції без
+            # кільця, без зʼєднаних кіл і без поворотів — там ланцюжок означає
+            # смужку, вʼязану вздовж набору: вусик гарбуза, шнурок, ремінець.
+            first_row = ""
+            for row in (pattern_section_rows.get(name) or [])[:1]:
+                first_row = row
+            if first_row and _CHART_CHAIN_START.search(first_row):
+                section["type"] = "flat"
+                continue
+
             section["type"] = "cylinder"
     except Exception:
         pass
