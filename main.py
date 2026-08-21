@@ -920,6 +920,19 @@ def build_chart(pattern: dict) -> dict:
         for section in pattern.get("sections") or []:
             if not isinstance(section, dict):
                 continue
+            # Секція, у якій нíчого не вʼяжуть (шнурки для вишивки, вказівка
+            # зі збірки), чарту не отримує. Інакше запасна гілка нижче
+            # підставляє рівний ряд із заявлених петель, і зʼявляється
+            # неіснуючий "R1, 6 st, worked in the round".
+            has_stitch = False
+            for row in section.get("rows") or []:
+                if isinstance(row, dict) and _CHART_HAS_STITCH.search(
+                        (row.get("instruction") or "").lower()):
+                    has_stitch = True
+                    break
+            if not has_stitch:
+                continue
+
             rounds = []
             previous = None
             for row in section.get("rows") or []:
@@ -980,6 +993,26 @@ def build_chart(pattern: dict) -> dict:
     return pattern
 
 
+# Початок від ланцюжка: ряд набирають і вʼяжуть назад уздовж нього. Це
+# найнадійніша ознака пласкої деталі — сильніша за будь-яку згадку зʼєднання,
+# бо смужка, вʼязана вбік, теж може містити "join" у першому ряду.
+_CHART_FOUNDATION = re.compile(
+    r"\d+(?:st|nd|rd|th)\s+ch\s+from\s+hook|foundation (?:ch|chain)")
+
+# Робота по колу: або зʼєднане коло, або безперервна спіраль.
+_CHART_ROUND = re.compile(
+    r"sl\s*st\b[^,.;]*\b(?:join|close)\b|join(?:ing)? with (?:a )?sl\s*st"
+    r"|to (?:the )?top of (?:the )?ch-?\d+ to join"
+    r"|do not join|continuous spiral|work(?:ing)? in a spiral|in the round")
+
+_CHART_MAGIC_RING = re.compile(r"magic ring|magic circle")
+
+# Позначення стібка. Секція без жодного з них нічого не вʼяже — це вишивка,
+# шнурок чи вказівка зі збірки, і чарту в неї бути не повинно.
+_CHART_HAS_STITCH = re.compile(
+    r"\b(?:sc2tog|dc2tog|hdc2tog|fpdc|bpdc|sl\s*st|slst|hdc|sc|dc|tr|inc|dec|ch)\b")
+
+
 def fix_chart_types(pattern: dict) -> dict:
     try:
         chart = pattern.get("chart")
@@ -1021,19 +1054,28 @@ def fix_chart_types(pattern: dict) -> dict:
             if has_magic_ring:
                 section["type"] = "round"
                 continue
-            has_turn = False
-            for instr in section_instructions.get(name, []):
-                if "turn" in instr:
-                    has_turn = True
-                    break
-            if not has_turn:
-                for r in rounds:
-                    if isinstance(r, dict):
-                        notes = (r.get("notes", "") or "").lower()
-                        if "turn" in notes:
-                            has_turn = True
-                            break
-            if has_turn:
+
+            # Увесь текст секції одним рядком: інструкції рядів плюс нотатки
+            # раундів. Доказ може стояти в будь-якому ряду, не лише в першому.
+            blob = " ".join(section_instructions.get(name, []))
+            for r in rounds:
+                if isinstance(r, dict):
+                    blob += " " + (r.get("notes", "") or "").lower()
+
+            # Порядок правил — за силою доказу, не за порядком у тексті.
+            # Ланцюжок вище за зʼєднання навмисно: обідок шапки має в одному
+            # ряду і "2nd ch from hook", і "create a clean join", але це
+            # смужка, вʼязана вбік, а не коло.
+            if _CHART_FOUNDATION.search(blob):
+                section["type"] = "flat"
+                continue
+            if _CHART_MAGIC_RING.search(blob):
+                section["type"] = "cylinder"
+                continue
+            if _CHART_ROUND.search(blob):
+                section["type"] = "cylinder"
+                continue
+            if "turn" in blob:
                 section["type"] = "flat"
                 continue
             section["type"] = "cylinder"
@@ -1499,8 +1541,12 @@ def _check_prose_dimensions(pattern: dict, computed, issues: list):
     число читає людина. На гарбузі різниця була втричі.
 
     Беремо лише фрази, де число прямо описує виріб — tall / wide / across /
-    high / long / in diameter. Довжини хвостиків пряжі, розміри гачка й голки
-    сюди не потрапляють, бо коло них таких слів немає.
+    high / in diameter. Довжини хвостиків пряжі, розміри гачка й голки сюди не
+    потрапляють, бо коло них таких слів немає.
+
+    "long" сюди НЕ входить: воно так само описує шнурок для вишивки, ланцюжок
+    чи хвостик для зшивання, і на гарбузі давало зауваження на цілком
+    правильний рядок.
     """
     if not computed:
         return
@@ -1511,7 +1557,7 @@ def _check_prose_dimensions(pattern: dict, computed, issues: list):
 
     dimension_re = re.compile(
         r"([\d.]+)\s*(cm|centimet\w*|in|inch|inches|\")\s*"
-        r"(tall|high|wide|across|long|in\s+diameter|in\s+width|in\s+height)",
+        r"(tall|high|wide|across|in\s+diameter|in\s+width|in\s+height)",
         re.IGNORECASE)
 
     def scan(text, where):
@@ -1676,7 +1722,10 @@ def _fix_prose_dimensions(pattern, computed):
 
     dimension_re = re.compile(
         r"([\d.]+)\s*(cm|centimet\w*|in|inch|inches|\")\s*"
-        r"(tall|high|wide|across|long|in\s+diameter|in\s+width|in\s+height)",
+        # "long" прибрано свідомо: воно двозначне. У гарбузі виправляч
+        # замінив ним довжину шнурка для вишивки на діаметр самого гарбуза,
+        # і шнурок став коротшим за виріб, який ним треба прошити наскрізь.
+        r"(tall|high|wide|across|in\s+diameter|in\s+width|in\s+height)",
         re.IGNORECASE)
 
     state = {"fixed": 0}
@@ -1880,6 +1929,11 @@ def _check_spiral_vs_joined(pattern, issues):
     видимий шов збоку. Плюс не сказано, куди йде перша петля наступного ряду —
     у петлю з'єднання чи в наступну, і саме ця двозначність збиває підрахунки.
     """
+    # Носильні речі сюди не входять: шапка, шкарпетка й рукавиця вʼяжуться
+    # зʼєднаними колами штатно, і шва там ніхто не рахує за дефект.
+    if detect_garment_type(pattern) in _WEARABLES:
+        return
+
     chart = pattern.get("chart")
     round_sections = set()
     if isinstance(chart, dict):
